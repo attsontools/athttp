@@ -1,0 +1,13 @@
+mod endpoint;
+mod protocol;
+
+#[cfg(test)]
+mod endpoint_test;
+#[cfg(test)]
+mod protocol_test;
+
+pub use endpoint::{read_endpoint, write_endpoint, Endpoint};
+pub use protocol::{
+    negotiate, ErrorEnvelope, HandshakeRequest, ServiceCapabilities, ServiceError,
+    ServiceHandshake, ServiceHandshakeResponse,
+};
