@@ -372,6 +372,20 @@ async fn dispatch_request(
         "data.collections.requests.delete" => {
             mutate_id(&params, |id| service.store().delete_collection_request(id))
         }
+        "data.openapi.import" => {
+            match serde_json::from_value::<http::OpenApiImportParams>(params) {
+                Ok(params) => http::fetch_openapi(params)
+                    .await
+                    .and_then(|document| {
+                        serde_json::to_value(document).map_err(|error| error.to_string())
+                    })
+                    .map_err(|error| ServiceError::new("HTTP_OPENAPI_IMPORT_FAILED", error)),
+                Err(error) => Err(ServiceError::new(
+                    "HTTP_SERVICE_REQUEST_INVALID",
+                    format!("invalid OpenAPI import params: {error}"),
+                )),
+            }
+        }
         _ => Err(ServiceError::new(
             "HTTP_SERVICE_METHOD_NOT_FOUND",
             format!("unknown service method: {method}"),
@@ -1142,6 +1156,92 @@ mod tests {
             let reply = call(&mut reader, method, method, serde_json::json!({})).await;
             assert_eq!(reply["result"], serde_json::json!([]), "{reply}");
         }
+
+        stop.notify_one();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn imports_openapi_document_over_service_rpc() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut request = Vec::new();
+            BufReader::new(&mut stream)
+                .read_until(b'\n', &mut request)
+                .await
+                .unwrap();
+            let body = r#"{"openapi":"3.1.0"}"#;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let data_directory = directory.path().display().to_string();
+        let server = ServiceServer::bind(
+            directory.path().join("service.endpoint.json"),
+            data_directory.clone(),
+            "0.1.0-alpha.0",
+        )
+        .await
+        .unwrap();
+        let endpoint = server.endpoint().clone();
+        let stop = server.stop_handle();
+        let task = tokio::spawn(server.run());
+        let mut client = connect_and_handshake(&endpoint, &data_directory, "openapi-client").await;
+
+        let reply = call(
+            &mut client,
+            "openapi-import",
+            "data.openapi.import",
+            serde_json::json!({
+                "url": format!("http://{upstream_address}/openapi.json"),
+                "headers": [{ "key": "X-Test", "value": "yes" }]
+            }),
+        )
+        .await;
+        assert_eq!(reply["kind"], "response", "{reply}");
+        assert_eq!(reply["result"], r#"{"openapi":"3.1.0"}"#);
+
+        stop.notify_one();
+        task.await.unwrap().unwrap();
+        upstream_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_non_http_openapi_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_directory = directory.path().display().to_string();
+        let server = ServiceServer::bind(
+            directory.path().join("service.endpoint.json"),
+            data_directory.clone(),
+            "0.1.0-alpha.0",
+        )
+        .await
+        .unwrap();
+        let endpoint = server.endpoint().clone();
+        let stop = server.stop_handle();
+        let task = tokio::spawn(server.run());
+        let mut client =
+            connect_and_handshake(&endpoint, &data_directory, "openapi-security").await;
+
+        let reply = call(
+            &mut client,
+            "openapi-file",
+            "data.openapi.import",
+            serde_json::json!({ "url": "file:///etc/passwd", "headers": [] }),
+        )
+        .await;
+        assert_eq!(reply["kind"], "error");
+        assert_eq!(reply["error"]["code"], "HTTP_OPENAPI_IMPORT_FAILED");
 
         stop.notify_one();
         task.await.unwrap().unwrap();

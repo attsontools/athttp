@@ -1,5 +1,6 @@
 mod cancel;
 mod models;
+mod openapi;
 mod send;
 mod storage;
 
@@ -8,6 +9,7 @@ pub use models::{
     HttpCollectionFolderRow, HttpCollectionRequestRow, HttpCollectionRow, HttpEnvRow,
     HttpEnvVarRow, HttpHistoryRow, HttpRequestSpec, HttpResponseInfo, HttpSendParams, HttpTabRow,
 };
+pub use openapi::{fetch_openapi, OpenApiImportParams};
 pub use send::send;
 pub use storage::HttpStore;
 
