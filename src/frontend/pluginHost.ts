@@ -25,7 +25,7 @@ interface PluginConnection {
 type ConnectPlugin = (appId: string) => Promise<PluginConnection>;
 
 export interface HttpHost {
-  readonly mode: 'plugin';
+  readonly mode: 'standalone' | 'plugin';
   readonly transport: ServiceTransport;
   initialize(onTheme: (theme: ThemeName) => void): Promise<ThemeName>;
   dispose(): void;
