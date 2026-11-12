@@ -18,7 +18,7 @@ fn request(host_api: &str, data_api: &str, service_api: &str) -> HandshakeReques
 
 #[test]
 fn accepts_compatible_ranges_and_returns_capabilities() {
-    let result = negotiate(&request("2.0.0", "1.0.0", "1.0.0"), "token").unwrap();
+    let result = negotiate(&request("2.0.0", "1.0.0", "1.0.0"), "token", "/tmp/http").unwrap();
     assert_eq!(result.service_api, "1.0.0");
     assert_eq!(result.data_api, "1.0.0");
     assert_eq!(result.host_api, "2.0.0");
@@ -35,21 +35,37 @@ fn accepts_compatible_ranges_and_returns_capabilities() {
 
 #[test]
 fn rejects_wrong_token_without_leaking_expected_value() {
-    let error = negotiate(&request("2.0.0", "1.0.0", "1.0.0"), "other-token").unwrap_err();
+    let error = negotiate(
+        &request("2.0.0", "1.0.0", "1.0.0"),
+        "other-token",
+        "/tmp/http",
+    )
+    .unwrap_err();
     assert_eq!(error.code, "HTTP_SERVICE_AUTH_FAILED");
     assert!(!error.message.contains("token"));
 }
 
 #[test]
 fn rejects_incompatible_api_with_stable_error() {
-    let error = negotiate(&request("1.0.0", "1.0.0", "1.0.0"), "token").unwrap_err();
+    let error = negotiate(&request("1.0.0", "1.0.0", "1.0.0"), "token", "/tmp/http").unwrap_err();
     assert_eq!(error.code, "HTTP_SERVICE_VERSION_UNSUPPORTED");
 }
 
 #[test]
 fn rejects_a_different_major_wildcard() {
-    let error = negotiate(&request("1.x", "1.0.0", "1.0.0"), "token").unwrap_err();
+    let error = negotiate(&request("1.x", "1.0.0", "1.0.0"), "token", "/tmp/http").unwrap_err();
     assert_eq!(error.code, "HTTP_SERVICE_VERSION_UNSUPPORTED");
+}
+
+#[test]
+fn rejects_a_client_claiming_a_different_data_directory() {
+    let error = negotiate(
+        &request("2.0.0", "1.0.0", "1.0.0"),
+        "token",
+        "/tmp/another-http",
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "HTTP_SERVICE_REQUEST_INVALID");
 }
 
 #[test]

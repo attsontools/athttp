@@ -116,10 +116,12 @@ pub enum ServiceReply {
 pub fn negotiate(
     request: &HandshakeRequest,
     expected_token: &str,
+    expected_data_directory: &str,
 ) -> Result<ServiceHandshakeResponse, ServiceError> {
     if request.protocol_version != 1
         || request.app_id != APP_ID
         || request.data_directory.trim().is_empty()
+        || request.data_directory != expected_data_directory
     {
         return Err(ServiceError::new(
             "HTTP_SERVICE_REQUEST_INVALID",

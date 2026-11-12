@@ -18,6 +18,7 @@ const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub struct ServiceServer {
     listener: TcpListener,
     endpoint_path: PathBuf,
+    data_directory: String,
     endpoint: Endpoint,
     stop: Arc<Notify>,
 }
@@ -25,6 +26,7 @@ pub struct ServiceServer {
 impl ServiceServer {
     pub async fn bind(
         endpoint_path: PathBuf,
+        data_directory: impl Into<String>,
         service_version: impl Into<String>,
     ) -> Result<Self, ServiceError> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|error| {
@@ -49,6 +51,7 @@ impl ServiceServer {
         Ok(Self {
             listener,
             endpoint_path,
+            data_directory: data_directory.into(),
             endpoint,
             stop: Arc::new(Notify::new()),
         })
@@ -71,19 +74,26 @@ impl ServiceServer {
                         format!("cannot accept local service client: {error}"),
                     ))?;
                     let token = self.endpoint.token.clone();
+                    let data_directory = self.data_directory.clone();
                     tokio::spawn(async move {
-                        let _ = handle_connection(stream, &token).await;
+                        let _ = handle_connection(stream, &token, &data_directory).await;
                     });
                 }
                 _ = self.stop.notified() => break,
             }
         }
-        let _ = std::fs::remove_file(&self.endpoint_path);
-        Ok(())
+        match std::fs::remove_file(&self.endpoint_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ServiceError::new(
+                "HTTP_SERVICE_ENDPOINT_CLEANUP_FAILED",
+                format!("cannot remove service endpoint: {error}"),
+            )),
+        }
     }
 }
 
-async fn handle_connection(stream: TcpStream, token: &str) -> io::Result<()> {
+async fn handle_connection(stream: TcpStream, token: &str, data_directory: &str) -> io::Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
     let mut frame = Vec::new();
@@ -98,13 +108,15 @@ async fn handle_connection(stream: TcpStream, token: &str) -> io::Result<()> {
         return Ok(());
     }
     let reply = match serde_json::from_slice::<ServiceHandshake>(&frame) {
-        Ok(ServiceHandshake::Request(request)) => match negotiate(&request, token) {
-            Ok(response) => ServiceReply::Handshake(response),
-            Err(error) => ServiceReply::Error {
-                request_id: request.request_id,
-                error: ErrorEnvelope::from(error),
-            },
-        },
+        Ok(ServiceHandshake::Request(request)) => {
+            match negotiate(&request, token, data_directory) {
+                Ok(response) => ServiceReply::Handshake(response),
+                Err(error) => ServiceReply::Error {
+                    request_id: request.request_id,
+                    error: ErrorEnvelope::from(error),
+                },
+            }
+        }
         _ => ServiceReply::Error {
             request_id: String::new(),
             error: ErrorEnvelope::from(ServiceError::new(
@@ -129,9 +141,13 @@ mod tests {
     async fn binds_loopback_and_answers_handshake() {
         let directory = tempfile::tempdir().unwrap();
         let endpoint_path = directory.path().join("service.endpoint.json");
-        let server = ServiceServer::bind(endpoint_path.clone(), "0.1.0-alpha.0")
-            .await
-            .unwrap();
+        let server = ServiceServer::bind(
+            endpoint_path.clone(),
+            directory.path().display().to_string(),
+            "0.1.0-alpha.0",
+        )
+        .await
+        .unwrap();
         let endpoint = server.endpoint().clone();
         let stop = server.stop_handle();
         let task = tokio::spawn(server.run());
