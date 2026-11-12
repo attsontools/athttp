@@ -4,10 +4,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
-use super::{buffer::SessionBuffer, sse::run_sse};
-use crate::http::{SseSpec, StreamMessage};
+use super::{buffer::SessionBuffer, sse::run_sse, ws::run_ws};
+use crate::http::{SseSpec, StreamMessage, WsSpec};
 
 #[derive(Debug, Clone)]
 pub struct StreamEvent {
@@ -18,6 +18,7 @@ pub struct StreamEvent {
 
 struct SessionHandle {
     cancel: oneshot::Sender<()>,
+    send: Option<mpsc::UnboundedSender<String>>,
     buffer: Arc<Mutex<SessionBuffer>>,
     generation: u64,
 }
@@ -53,6 +54,7 @@ impl HttpStreamState {
             session_id.clone(),
             SessionHandle {
                 cancel,
+                send: None,
                 buffer: Arc::clone(&buffer),
                 generation,
             },
@@ -62,6 +64,53 @@ impl HttpStreamState {
             run_sse(state, session_id, spec, receiver, buffer, generation).await;
         });
         generation
+    }
+
+    pub fn open_ws(self: &Arc<Self>, session_id: String, spec: WsSpec) -> u64 {
+        self.close(&session_id);
+        let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
+        let buffer = Arc::new(Mutex::new(SessionBuffer::new()));
+        let (cancel, cancel_receiver) = oneshot::channel();
+        let (send, send_receiver) = mpsc::unbounded_channel();
+        self.sessions.lock().unwrap().insert(
+            session_id.clone(),
+            SessionHandle {
+                cancel,
+                send: Some(send),
+                buffer: Arc::clone(&buffer),
+                generation,
+            },
+        );
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            run_ws(
+                state,
+                session_id,
+                spec,
+                cancel_receiver,
+                send_receiver,
+                buffer,
+                generation,
+            )
+            .await;
+        });
+        generation
+    }
+
+    pub fn send(&self, session_id: &str, text: String) -> Result<(), String> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "stream state poisoned".to_string())?;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session not open".to_string())?;
+        session
+            .send
+            .as_ref()
+            .ok_or_else(|| "session does not accept sends".to_string())?
+            .send(text)
+            .map_err(|error| format!("send failed: {error}"))
     }
 
     pub fn publish(

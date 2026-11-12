@@ -420,6 +420,22 @@ async fn dispatch_request(
                         Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
                     }
                 }
+                (Ok(session_id), Ok("ws")) => {
+                    let spec = params
+                        .get("spec")
+                        .cloned()
+                        .ok_or_else(|| "spec is required".to_string())
+                        .and_then(|value| {
+                            serde_json::from_value::<http::WsSpec>(value)
+                                .map_err(|error| error.to_string())
+                        });
+                    match spec {
+                        Ok(spec) => Ok(serde_json::json!({
+                            "generation": http::stream::open_ws(Arc::clone(service.stream_state()), session_id.into(), spec)
+                        })),
+                        Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+                    }
+                }
                 (Ok(_), Ok(kind)) => Err(ServiceError::new(
                     "HTTP_SERVICE_REQUEST_INVALID",
                     format!("unsupported stream kind: {kind}"),
@@ -440,6 +456,19 @@ async fn dispatch_request(
                 .stream_state()
                 .snapshot(session_id))),
             Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+        },
+        "stream.send" => match (
+            required_string(&params, "sessionId"),
+            required_string(&params, "text"),
+        ) {
+            (Ok(session_id), Ok(text)) => service
+                .stream_state()
+                .send(session_id, text.into())
+                .map(|()| serde_json::Value::Null)
+                .map_err(|error| ServiceError::new("HTTP_STREAM_SEND_FAILED", error)),
+            (Err(error), _) | (_, Err(error)) => {
+                Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error))
+            }
         },
         _ => Err(ServiceError::new(
             "HTTP_SERVICE_METHOD_NOT_FOUND",
@@ -512,6 +541,7 @@ async fn write_reply(
 mod tests {
     use super::*;
     use crate::{read_endpoint, HandshakeRequest};
+    use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
 
@@ -1433,6 +1463,81 @@ mod tests {
         )
         .await;
         assert_eq!(empty["result"], serde_json::json!([]));
+
+        stop.notify_one();
+        task.await.unwrap().unwrap();
+        upstream_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sends_and_receives_websocket_messages_over_stream_rpc() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _) = upstream.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            if let Some(Ok(message)) = socket.next().await {
+                socket.send(message).await.unwrap();
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let data_directory = directory.path().display().to_string();
+        let server = ServiceServer::bind(
+            directory.path().join("service.endpoint.json"),
+            data_directory.clone(),
+            "0.1.0-alpha.0",
+        )
+        .await
+        .unwrap();
+        let endpoint = server.endpoint().clone();
+        let stop = server.stop_handle();
+        let task = tokio::spawn(server.run());
+        let mut client = connect_and_handshake(&endpoint, &data_directory, "ws-client").await;
+
+        let opened = call_response(
+            &mut client,
+            "ws-open",
+            "stream.open",
+            serde_json::json!({
+                "sessionId": "ws-1", "kind": "ws",
+                "spec": { "url": format!("ws://{upstream_address}/echo") }
+            }),
+        )
+        .await;
+        assert_eq!(opened["kind"], "response", "{opened}");
+        let sent = call_response(
+            &mut client,
+            "ws-send",
+            "stream.send",
+            serde_json::json!({ "sessionId": "ws-1", "text": "hello" }),
+        )
+        .await;
+        assert_eq!(sent["kind"], "response", "{sent}");
+
+        let mut snapshot = serde_json::json!([]);
+        for attempt in 0..10 {
+            let reply = call_response(
+                &mut client,
+                &format!("ws-snapshot-{attempt}"),
+                "stream.snapshot",
+                serde_json::json!({ "sessionId": "ws-1" }),
+            )
+            .await;
+            snapshot = reply["result"].clone();
+            if snapshot.as_array().unwrap().iter().any(|message| {
+                message["kind"] == "wsText"
+                    && message["direction"] == "in"
+                    && message["text"] == "hello"
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(snapshot.as_array().unwrap().iter().any(|message| {
+            message["kind"] == "wsText"
+                && message["direction"] == "in"
+                && message["text"] == "hello"
+        }));
 
         stop.notify_one();
         task.await.unwrap().unwrap();

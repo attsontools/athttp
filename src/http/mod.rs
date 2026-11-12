@@ -7,9 +7,9 @@ pub mod stream;
 
 pub use cancel::HttpCancelState;
 pub use models::{
-    HttpCollectionFolderRow, HttpCollectionRequestRow, HttpCollectionRow, HttpEnvRow,
+    Direction, HttpCollectionFolderRow, HttpCollectionRequestRow, HttpCollectionRow, HttpEnvRow,
     HttpEnvVarRow, HttpHistoryRow, HttpRequestSpec, HttpResponseInfo, HttpSendParams, HttpTabRow,
-    SseSpec, StreamMessage,
+    SseSpec, StreamMessage, WsSpec,
 };
 pub use openapi::{fetch_openapi, OpenApiImportParams};
 pub use send::send;

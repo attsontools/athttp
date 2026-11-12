@@ -209,6 +209,31 @@ pub struct SseSpec {
     pub last_event_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WsSpec {
+    pub url: String,
+    #[serde(default)]
+    pub headers: Vec<KeyValue>,
+    #[serde(default)]
+    pub query_params: Vec<KeyValue>,
+    #[serde(default)]
+    pub auth: HttpAuth,
+    #[serde(default = "default_true")]
+    pub verify_ssl: bool,
+    #[serde(default)]
+    pub subprotocols: Vec<String>,
+    #[serde(default)]
+    pub ping_interval_seconds: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Direction {
+    In,
+    Out,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum StreamMessage {
@@ -224,6 +249,18 @@ pub enum StreamMessage {
         id: Option<String>,
         retry_ms: Option<u64>,
         truncated: bool,
+    },
+    WsText {
+        at_ms: u64,
+        direction: Direction,
+        text: String,
+        truncated: bool,
+    },
+    WsBinary {
+        at_ms: u64,
+        direction: Direction,
+        bytes_len: usize,
+        preview_b64: String,
     },
     Closed {
         at_ms: u64,
@@ -252,6 +289,8 @@ impl StreamMessage {
             Self::SseEvent {
                 event, data, id, ..
             } => 32 + event.len() + data.len() + id.as_deref().map(str::len).unwrap_or(0),
+            Self::WsText { text, .. } => 24 + text.len(),
+            Self::WsBinary { preview_b64, .. } => 32 + preview_b64.len(),
             Self::Closed { reason, .. } => 24 + reason.len(),
             Self::Error { message, .. } => 24 + message.len(),
             Self::BufferTruncated { .. } => 32,
