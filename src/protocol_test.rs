@@ -1,6 +1,5 @@
 use super::protocol::{
-    negotiate, ErrorEnvelope, HandshakeRequest, ServiceCapabilities, ServiceError,
-    ServiceHandshake,
+    negotiate, ErrorEnvelope, HandshakeRequest, ServiceCapabilities, ServiceError, ServiceHandshake,
 };
 
 fn request(host_api: &str, data_api: &str, service_api: &str) -> HandshakeRequest {

@@ -47,7 +47,9 @@ pub struct ServiceHandshakeResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ServiceHandshake {
+    #[serde(rename = "request")]
     Request(HandshakeRequest),
+    #[serde(rename = "response")]
     Response(ServiceHandshakeResponse),
 }
 
@@ -99,8 +101,26 @@ impl From<ServiceError> for ErrorEnvelope {
     }
 }
 
-pub fn negotiate(request: &HandshakeRequest, expected_token: &str) -> Result<ServiceHandshakeResponse, ServiceError> {
-    if request.protocol_version != 1 || request.app_id != APP_ID || request.data_directory.trim().is_empty() {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ServiceReply {
+    #[serde(rename = "handshake")]
+    Handshake(ServiceHandshakeResponse),
+    #[serde(rename = "error")]
+    Error {
+        request_id: String,
+        error: ErrorEnvelope,
+    },
+}
+
+pub fn negotiate(
+    request: &HandshakeRequest,
+    expected_token: &str,
+) -> Result<ServiceHandshakeResponse, ServiceError> {
+    if request.protocol_version != 1
+        || request.app_id != APP_ID
+        || request.data_directory.trim().is_empty()
+    {
         return Err(ServiceError::new(
             "HTTP_SERVICE_REQUEST_INVALID",
             "handshake request is invalid",
@@ -146,8 +166,16 @@ fn compatible(client_range: &str, current: &str) -> bool {
         Err(_) => return false,
     };
     let normalized = match client_range.trim() {
-        value if value.ends_with(".x") => format!(">={}.0.0,<{}.0.0", &value[..value.len() - 2], current.major + 1),
-        value if value.chars().all(|character| character.is_ascii_digit() || character == '.') => {
+        value if value.ends_with(".x") => format!(
+            ">={}.0.0,<{}.0.0",
+            &value[..value.len() - 2],
+            current.major + 1
+        ),
+        value
+            if value
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '.') =>
+        {
             format!("={value}")
         }
         value => value.to_string(),

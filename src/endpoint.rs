@@ -25,7 +25,10 @@ impl std::fmt::Display for EndpointError {
 impl std::error::Error for EndpointError {}
 
 pub fn write_endpoint(path: &Path, endpoint: &Endpoint) -> Result<(), EndpointError> {
-    if endpoint.port == 0 || endpoint.token.trim().is_empty() || endpoint.service_version.trim().is_empty() {
+    if endpoint.port == 0
+        || endpoint.token.trim().is_empty()
+        || endpoint.service_version.trim().is_empty()
+    {
         return Err(EndpointError {
             code: "HTTP_SERVICE_ENDPOINT_INVALID",
             message: "endpoint fields are invalid".into(),
@@ -65,7 +68,10 @@ pub fn read_endpoint(path: &Path) -> Result<Endpoint, EndpointError> {
         code: "HTTP_SERVICE_ENDPOINT_INVALID",
         message: format!("cannot decode endpoint: {error}"),
     })?;
-    if endpoint.port == 0 || endpoint.token.trim().is_empty() || endpoint.service_version.trim().is_empty() {
+    if endpoint.port == 0
+        || endpoint.token.trim().is_empty()
+        || endpoint.service_version.trim().is_empty()
+    {
         return Err(EndpointError {
             code: "HTTP_SERVICE_ENDPOINT_INVALID",
             message: "endpoint fields are invalid".into(),
