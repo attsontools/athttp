@@ -1,4 +1,5 @@
 mod endpoint;
+pub mod http;
 mod protocol;
 pub mod server;
 
@@ -10,5 +11,5 @@ mod protocol_test;
 pub use endpoint::{read_endpoint, write_endpoint, Endpoint};
 pub use protocol::{
     negotiate, ErrorEnvelope, HandshakeRequest, ServiceCapabilities, ServiceError,
-    ServiceHandshake, ServiceHandshakeResponse, ServiceReply,
+    ServiceHandshake, ServiceHandshakeResponse, ServiceReply, ServiceRequest,
 };
