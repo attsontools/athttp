@@ -76,7 +76,9 @@ impl ServiceServer {
                     let token = self.endpoint.token.clone();
                     let data_directory = self.data_directory.clone();
                     tokio::spawn(async move {
-                        let _ = handle_connection(stream, &token, &data_directory).await;
+                        if let Err(error) = handle_connection(stream, &token, &data_directory).await {
+                            eprintln!("[athttp-service] client connection failed: {error}");
+                        }
                     });
                 }
                 _ = self.stop.notified() => break,
