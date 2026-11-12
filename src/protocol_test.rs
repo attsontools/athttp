@@ -47,6 +47,12 @@ fn rejects_incompatible_api_with_stable_error() {
 }
 
 #[test]
+fn rejects_a_different_major_wildcard() {
+    let error = negotiate(&request("1.x", "1.0.0", "1.0.0"), "token").unwrap_err();
+    assert_eq!(error.code, "HTTP_SERVICE_VERSION_UNSUPPORTED");
+}
+
+#[test]
 fn wire_envelopes_round_trip_without_losing_request_id() {
     let envelope = ServiceHandshake::request(request("2.0.0", "1.0.0", "1.0.0"));
     let encoded = serde_json::to_vec(&envelope).unwrap();

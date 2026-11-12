@@ -1,6 +1,7 @@
 use std::{fs, path::Path};
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,7 +43,7 @@ pub fn write_endpoint(path: &Path, endpoint: &Endpoint) -> Result<(), EndpointEr
         code: "HTTP_SERVICE_ENDPOINT_WRITE_FAILED",
         message: format!("cannot create endpoint directory: {error}"),
     })?;
-    let temporary = path.with_extension("tmp");
+    let temporary = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
     let bytes = serde_json::to_vec(endpoint).map_err(|error| EndpointError {
         code: "HTTP_SERVICE_ENDPOINT_WRITE_FAILED",
         message: format!("cannot encode endpoint: {error}"),
@@ -51,7 +52,7 @@ pub fn write_endpoint(path: &Path, endpoint: &Endpoint) -> Result<(), EndpointEr
         code: "HTTP_SERVICE_ENDPOINT_WRITE_FAILED",
         message: format!("cannot write endpoint: {error}"),
     })?;
-    set_private_permissions(&temporary);
+    set_private_permissions(&temporary)?;
     fs::rename(&temporary, path).map_err(|error| EndpointError {
         code: "HTTP_SERVICE_ENDPOINT_WRITE_FAILED",
         message: format!("cannot activate endpoint: {error}"),
@@ -80,14 +81,20 @@ pub fn read_endpoint(path: &Path) -> Result<Endpoint, EndpointError> {
     Ok(endpoint)
 }
 
-fn set_private_permissions(path: &Path) {
+fn set_private_permissions(path: &Path) -> Result<(), EndpointError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = fs::metadata(path) {
-            let mut permissions = metadata.permissions();
-            permissions.set_mode(0o600);
-            let _ = fs::set_permissions(path, permissions);
-        }
+        let metadata = fs::metadata(path).map_err(|error| EndpointError {
+            code: "HTTP_SERVICE_ENDPOINT_WRITE_FAILED",
+            message: format!("cannot inspect endpoint permissions: {error}"),
+        })?;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(path, permissions).map_err(|error| EndpointError {
+            code: "HTTP_SERVICE_ENDPOINT_WRITE_FAILED",
+            message: format!("cannot restrict endpoint permissions: {error}"),
+        })?;
     }
+    Ok(())
 }

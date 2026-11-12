@@ -1,9 +1,10 @@
 use std::{io, path::PathBuf, sync::Arc};
 
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::Notify,
+    time::{timeout, Duration},
 };
 use uuid::Uuid;
 
@@ -84,10 +85,16 @@ impl ServiceServer {
 
 async fn handle_connection(stream: TcpStream, token: &str) -> io::Result<()> {
     let (read_half, mut write_half) = stream.into_split();
-    let mut reader = BufReader::new(read_half);
+    let reader = BufReader::new(read_half);
     let mut frame = Vec::new();
-    let read = reader.read_until(b'\n', &mut frame).await?;
-    if read == 0 || frame.len() > MAX_FRAME_BYTES {
+    let mut limited = reader.take((MAX_FRAME_BYTES + 1) as u64);
+    let read = timeout(
+        Duration::from_secs(10),
+        limited.read_until(b'\n', &mut frame),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))??;
+    if read == 0 || frame.len() > MAX_FRAME_BYTES || frame.last() != Some(&b'\n') {
         return Ok(());
     }
     let reply = match serde_json::from_slice::<ServiceHandshake>(&frame) {

@@ -166,11 +166,11 @@ fn compatible(client_range: &str, current: &str) -> bool {
         Err(_) => return false,
     };
     let normalized = match client_range.trim() {
-        value if value.ends_with(".x") => format!(
-            ">={}.0.0,<{}.0.0",
-            &value[..value.len() - 2],
-            current.major + 1
-        ),
+        value if value.ends_with(".x") => {
+            let major = value[..value.len() - 2].parse::<u64>().ok();
+            let Some(major) = major else { return false };
+            format!(">={major}.0.0,<{}.0.0", major + 1)
+        }
         value
             if value
                 .chars()
