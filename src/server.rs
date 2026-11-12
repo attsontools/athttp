@@ -310,6 +310,38 @@ async fn dispatch_request(
             .clear_history()
             .map(|()| serde_json::Value::Null)
             .map_err(|error| ServiceError::new("HTTP_DATA_WRITE_FAILED", error)),
+        "data.envs.list" => service
+            .store()
+            .list_envs()
+            .and_then(|rows| serde_json::to_value(rows).map_err(|error| error.to_string()))
+            .map_err(|error| ServiceError::new("HTTP_DATA_READ_FAILED", error)),
+        "data.envs.upsert" => match required_row::<http::HttpEnvRow>(&params) {
+            Ok(row) => service
+                .store()
+                .upsert_env(row)
+                .map(|()| serde_json::Value::Null)
+                .map_err(|error| ServiceError::new("HTTP_DATA_WRITE_FAILED", error)),
+            Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+        },
+        "data.envs.delete" => mutate_id(&params, |id| service.store().delete_env(id)),
+        "data.envs.setActive" => mutate_id(&params, |id| service.store().set_active_env(id)),
+        "data.envs.vars.list" => match required_string(&params, "envId") {
+            Ok(env_id) => service
+                .store()
+                .list_env_vars(env_id)
+                .and_then(|rows| serde_json::to_value(rows).map_err(|error| error.to_string()))
+                .map_err(|error| ServiceError::new("HTTP_DATA_READ_FAILED", error)),
+            Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+        },
+        "data.envs.vars.upsert" => match required_row::<http::HttpEnvVarRow>(&params) {
+            Ok(row) => service
+                .store()
+                .upsert_env_var(row)
+                .map(|()| serde_json::Value::Null)
+                .map_err(|error| ServiceError::new("HTTP_DATA_WRITE_FAILED", error)),
+            Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+        },
+        "data.envs.vars.delete" => mutate_id(&params, |id| service.store().delete_env_var(id)),
         _ => Err(ServiceError::new(
             "HTTP_SERVICE_METHOD_NOT_FOUND",
             format!("unknown service method: {method}"),
@@ -341,6 +373,17 @@ fn required_row<T: serde::de::DeserializeOwned>(params: &serde_json::Value) -> R
         .cloned()
         .ok_or_else(|| "row is required".to_string())?;
     serde_json::from_value(value).map_err(|error| format!("invalid row: {error}"))
+}
+
+fn mutate_id(
+    params: &serde_json::Value,
+    operation: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<serde_json::Value, ServiceError> {
+    let id = required_string(params, "id")
+        .map_err(|error| ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error))?;
+    operation(id)
+        .map(|()| serde_json::Value::Null)
+        .map_err(|error| ServiceError::new("HTTP_DATA_WRITE_FAILED", error))
 }
 
 async fn write_reply(
@@ -894,6 +937,70 @@ mod tests {
         other.read_until(b'\n', &mut line).await.unwrap();
         let empty_reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
         assert_eq!(empty_reply["result"], serde_json::json!([]));
+
+        stop.notify_one();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn shares_environments_and_variables_through_data_api() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_directory = directory.path().display().to_string();
+        let server = ServiceServer::bind(
+            directory.path().join("service.endpoint.json"),
+            data_directory.clone(),
+            "0.1.0-alpha.0",
+        )
+        .await
+        .unwrap();
+        let endpoint = server.endpoint().clone();
+        let stop = server.stop_handle();
+        let task = tokio::spawn(server.run());
+        let mut writer = connect_and_handshake(&endpoint, &data_directory, "env-writer").await;
+
+        for request in [
+            serde_json::json!({
+                "kind": "request", "requestId": "env-upsert", "method": "data.envs.upsert",
+                "params": { "row": { "id": "env-1", "name": "Production", "isActive": true,
+                    "orderIndex": 0, "updatedAt": 100 } }
+            }),
+            serde_json::json!({
+                "kind": "request", "requestId": "var-upsert", "method": "data.envs.vars.upsert",
+                "params": { "row": { "id": "var-1", "envId": "env-1", "key": "apiHost",
+                    "value": "https://api.example.com", "enabled": true, "orderIndex": 0,
+                    "updatedAt": 101 } }
+            }),
+        ] {
+            let mut bytes = serde_json::to_vec(&request).unwrap();
+            bytes.push(b'\n');
+            writer.get_mut().write_all(&bytes).await.unwrap();
+            let mut line = Vec::new();
+            writer.read_until(b'\n', &mut line).await.unwrap();
+            let reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            assert_eq!(reply["kind"], "response", "{reply}");
+        }
+
+        let mut reader = connect_and_handshake(&endpoint, &data_directory, "env-reader").await;
+        for (method, params, expected_id) in [
+            ("data.envs.list", serde_json::json!({}), "env-1"),
+            (
+                "data.envs.vars.list",
+                serde_json::json!({ "envId": "env-1" }),
+                "var-1",
+            ),
+        ] {
+            let request = serde_json::json!({
+                "kind": "request", "requestId": format!("{method}-list"), "method": method,
+                "params": params
+            });
+            let mut bytes = serde_json::to_vec(&request).unwrap();
+            bytes.push(b'\n');
+            reader.get_mut().write_all(&bytes).await.unwrap();
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await.unwrap();
+            let reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            assert_eq!(reply["result"][0]["id"], expected_id, "{reply}");
+        }
 
         stop.notify_one();
         task.await.unwrap().unwrap();

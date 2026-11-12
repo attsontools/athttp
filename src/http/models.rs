@@ -121,3 +121,25 @@ pub struct HttpHistoryRow {
     pub resp_summary: Option<String>,
     pub created_at: i64,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpEnvRow {
+    pub id: String,
+    pub name: String,
+    pub is_active: bool,
+    pub order_index: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpEnvVarRow {
+    pub id: String,
+    pub env_id: String,
+    pub key: String,
+    pub value: String,
+    pub enabled: bool,
+    pub order_index: i64,
+    pub updated_at: i64,
+}

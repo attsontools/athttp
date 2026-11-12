@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf, sync::Mutex};
 
 use rusqlite::{params, Connection};
 
-use super::{HttpHistoryRow, HttpTabRow};
+use super::{HttpEnvRow, HttpEnvVarRow, HttpHistoryRow, HttpTabRow};
 
 const HISTORY_MAX_ROWS: i64 = 500;
 const HISTORY_MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -24,7 +24,9 @@ impl HttpStore {
             .map_err(|error| format!("打开 HTTP 数据库失败：{error}"))?;
         let needs_migration = database_existed
             && (!has_column(&connection, "http_tabs", "kind")?
-                || !has_table(&connection, "http_history")?);
+                || !has_table(&connection, "http_history")?
+                || !has_table(&connection, "http_envs")?
+                || !has_table(&connection, "http_env_vars")?);
         if needs_migration {
             let backup_path = root_directory.join("http.sqlite3.pre-service-v1.bak");
             if !backup_path.exists() {
@@ -61,6 +63,25 @@ impl HttpStore {
                 );
                 CREATE INDEX IF NOT EXISTS idx_http_history_created
                     ON http_history(created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS http_envs (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 0,
+                    order_index INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS http_env_vars (
+                    id TEXT PRIMARY KEY,
+                    env_id TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    order_index INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_http_env_vars_env ON http_env_vars(env_id);
                 "#,
             )
             .map_err(|error| format!("初始化 HTTP 数据库失败：{error}"))?;
@@ -225,6 +246,133 @@ impl HttpStore {
     pub fn clear_history(&self) -> Result<(), String> {
         self.connection()
             .execute("DELETE FROM http_history", [])
+            .map_err(map_error)?;
+        Ok(())
+    }
+
+    pub fn list_envs(&self) -> Result<Vec<HttpEnvRow>, String> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, name, is_active, order_index, updated_at FROM http_envs \
+                 ORDER BY order_index ASC, updated_at ASC",
+            )
+            .map_err(map_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(HttpEnvRow {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    is_active: row.get::<_, i64>(2)? != 0,
+                    order_index: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            })
+            .map_err(map_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_error)?;
+        Ok(rows)
+    }
+
+    pub fn upsert_env(&self, row: HttpEnvRow) -> Result<(), String> {
+        self.connection()
+            .execute(
+                "INSERT INTO http_envs (id, name, is_active, order_index, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(id) DO UPDATE SET \
+                 name=excluded.name, is_active=excluded.is_active, \
+                 order_index=excluded.order_index, updated_at=excluded.updated_at",
+                params![
+                    row.id,
+                    row.name,
+                    row.is_active as i64,
+                    row.order_index,
+                    row.updated_at
+                ],
+            )
+            .map_err(map_error)?;
+        Ok(())
+    }
+
+    pub fn delete_env(&self, id: &str) -> Result<(), String> {
+        let mut connection = self.connection();
+        let transaction = connection.transaction().map_err(map_error)?;
+        transaction
+            .execute("DELETE FROM http_env_vars WHERE env_id = ?1", params![id])
+            .map_err(map_error)?;
+        transaction
+            .execute("DELETE FROM http_envs WHERE id = ?1", params![id])
+            .map_err(map_error)?;
+        transaction.commit().map_err(map_error)
+    }
+
+    pub fn set_active_env(&self, id: &str) -> Result<(), String> {
+        let mut connection = self.connection();
+        let transaction = connection.transaction().map_err(map_error)?;
+        transaction
+            .execute("UPDATE http_envs SET is_active = 0 WHERE is_active = 1", [])
+            .map_err(map_error)?;
+        transaction
+            .execute(
+                "UPDATE http_envs SET is_active = 1 WHERE id = ?1",
+                params![id],
+            )
+            .map_err(map_error)?;
+        transaction.commit().map_err(map_error)
+    }
+
+    pub fn list_env_vars(&self, env_id: &str) -> Result<Vec<HttpEnvVarRow>, String> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, env_id, key, value, enabled, order_index, updated_at \
+                 FROM http_env_vars WHERE env_id = ?1 \
+                 ORDER BY order_index ASC, updated_at ASC",
+            )
+            .map_err(map_error)?;
+        let rows = statement
+            .query_map([env_id], |row| {
+                Ok(HttpEnvVarRow {
+                    id: row.get(0)?,
+                    env_id: row.get(1)?,
+                    key: row.get(2)?,
+                    value: row.get(3)?,
+                    enabled: row.get::<_, i64>(4)? != 0,
+                    order_index: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })
+            .map_err(map_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_error)?;
+        Ok(rows)
+    }
+
+    pub fn upsert_env_var(&self, row: HttpEnvVarRow) -> Result<(), String> {
+        self.connection()
+            .execute(
+                "INSERT INTO http_env_vars \
+                 (id, env_id, key, value, enabled, order_index, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(id) DO UPDATE SET \
+                 env_id=excluded.env_id, key=excluded.key, value=excluded.value, \
+                 enabled=excluded.enabled, order_index=excluded.order_index, \
+                 updated_at=excluded.updated_at",
+                params![
+                    row.id,
+                    row.env_id,
+                    row.key,
+                    row.value,
+                    row.enabled as i64,
+                    row.order_index,
+                    row.updated_at
+                ],
+            )
+            .map_err(map_error)?;
+        Ok(())
+    }
+
+    pub fn delete_env_var(&self, id: &str) -> Result<(), String> {
+        self.connection()
+            .execute("DELETE FROM http_env_vars WHERE id = ?1", params![id])
             .map_err(map_error)?;
         Ok(())
     }
