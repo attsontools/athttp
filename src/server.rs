@@ -1,4 +1,9 @@
-use std::{io, path::PathBuf, sync::Arc};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -23,6 +28,7 @@ pub struct ServiceServer {
     endpoint: Endpoint,
     stop: Arc<Notify>,
     service: Arc<HttpService>,
+    lease: Option<ServiceLease>,
 }
 
 impl ServiceServer {
@@ -32,8 +38,6 @@ impl ServiceServer {
         service_version: impl Into<String>,
     ) -> Result<Self, ServiceError> {
         let data_directory = data_directory.into();
-        let service = HttpService::new(PathBuf::from(&data_directory))
-            .map_err(|error| ServiceError::new("HTTP_DATA_MIGRATION_FAILED", error))?;
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|error| {
             ServiceError::new(
                 "HTTP_SERVICE_BIND_FAILED",
@@ -46,9 +50,13 @@ impl ServiceServer {
                 format!("cannot read local service endpoint: {error}"),
             )
         })?;
+        let token = Uuid::new_v4().to_string();
+        let lease = ServiceLease::acquire(Path::new(&data_directory), &token)?;
+        let service = HttpService::new(PathBuf::from(&data_directory))
+            .map_err(|error| ServiceError::new("HTTP_DATA_MIGRATION_FAILED", error))?;
         let endpoint = Endpoint {
             port: address.port(),
-            token: Uuid::new_v4().to_string(),
+            token,
             service_version: service_version.into(),
         };
         write_endpoint(&endpoint_path, &endpoint)
@@ -60,6 +68,7 @@ impl ServiceServer {
             endpoint,
             stop: Arc::new(Notify::new()),
             service: Arc::new(service),
+            lease: Some(lease),
         })
     }
 
@@ -71,7 +80,7 @@ impl ServiceServer {
         Arc::clone(&self.stop)
     }
 
-    pub async fn run(self) -> Result<(), ServiceError> {
+    pub async fn run(mut self) -> Result<(), ServiceError> {
         loop {
             tokio::select! {
                 result = self.listener.accept() => {
@@ -91,15 +100,122 @@ impl ServiceServer {
                 _ = self.stop.notified() => break,
             }
         }
-        match std::fs::remove_file(&self.endpoint_path) {
+        let endpoint_result = match std::fs::remove_file(&self.endpoint_path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(ServiceError::new(
                 "HTTP_SERVICE_ENDPOINT_CLEANUP_FAILED",
                 format!("cannot remove service endpoint: {error}"),
             )),
+        };
+        let lease_result = self
+            .lease
+            .take()
+            .expect("service lease exists while server is running")
+            .release();
+        endpoint_result?;
+        lease_result
+    }
+}
+
+struct ServiceLease {
+    path: Option<PathBuf>,
+    file: Option<File>,
+}
+
+impl ServiceLease {
+    fn acquire(data_directory: &Path, token: &str) -> Result<Self, ServiceError> {
+        fs::create_dir_all(data_directory).map_err(|error| {
+            ServiceError::new(
+                "HTTP_DATA_MIGRATION_FAILED",
+                format!("cannot create HTTP data directory: {error}"),
+            )
+        })?;
+        let path = data_directory.join("service.lock");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| {
+                let code = if error.kind() == io::ErrorKind::AlreadyExists {
+                    "HTTP_SERVICE_ALREADY_RUNNING"
+                } else {
+                    "HTTP_SERVICE_LEASE_FAILED"
+                };
+                ServiceError::new(code, format!("cannot acquire HTTP service lease: {error}"))
+            })?;
+        let mut lease = Self {
+            path: Some(path),
+            file: Some(file),
+        };
+        set_lease_permissions(lease.file.as_ref().expect("lease file is open"))?;
+        writeln!(
+            lease.file.as_mut().expect("lease file is open"),
+            "{token}\n{}",
+            std::process::id()
+        )
+        .map_err(|error| {
+            ServiceError::new(
+                "HTTP_SERVICE_LEASE_FAILED",
+                format!("cannot write HTTP service lease: {error}"),
+            )
+        })?;
+        Ok(lease)
+    }
+
+    fn release(self) -> Result<(), ServiceError> {
+        self.release_with(|path| fs::remove_file(path))
+    }
+
+    fn release_with(
+        mut self,
+        remove: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> Result<(), ServiceError> {
+        self.file.take();
+        let path = self
+            .path
+            .take()
+            .expect("service lease path exists until release");
+        remove(&path).map_err(|error| {
+            ServiceError::new(
+                "HTTP_SERVICE_LEASE_CLEANUP_FAILED",
+                format!("cannot remove HTTP service lease: {error}"),
+            )
+        })
+    }
+}
+
+impl Drop for ServiceLease {
+    fn drop(&mut self) {
+        self.file.take();
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path);
         }
     }
+}
+
+fn set_lease_permissions(file: &File) -> Result<(), ServiceError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = file
+            .metadata()
+            .map_err(|error| {
+                ServiceError::new(
+                    "HTTP_SERVICE_LEASE_FAILED",
+                    format!("cannot inspect HTTP service lease: {error}"),
+                )
+            })?
+            .permissions();
+        permissions.set_mode(0o600);
+        file.set_permissions(permissions).map_err(|error| {
+            ServiceError::new(
+                "HTTP_SERVICE_LEASE_FAILED",
+                format!("cannot restrict HTTP service lease: {error}"),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 async fn handle_connection(
@@ -544,6 +660,22 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
+
+    #[test]
+    fn releasing_a_lease_does_not_remove_a_new_owners_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let lease = ServiceLease::acquire(directory.path(), "first-owner").unwrap();
+        let lease_path = lease.path.clone().unwrap();
+
+        lease
+            .release_with(|path| {
+                fs::remove_file(path)?;
+                fs::write(path, "second-owner")
+            })
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(lease_path).unwrap(), "second-owner");
+    }
 
     async fn connect_and_handshake(
         endpoint: &Endpoint,

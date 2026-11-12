@@ -5,6 +5,7 @@ import { darkTheme, NConfigProvider, NMessageProvider } from 'naive-ui';
 import HttpTool from './components/http/HttpTool.vue';
 import { configureHttpStore } from './composables/useHttpStore';
 import type { HttpHost, ThemeName } from './frontend/pluginHost';
+import { formatServiceError } from './frontend/transport';
 import { darkOverrides, lightOverrides } from './theme';
 
 const props = defineProps<{ host: HttpHost }>();
@@ -21,7 +22,7 @@ onMounted(async () => {
     theme.value = await props.host.initialize(applyTheme);
     applyTheme(theme.value);
   } catch (error) {
-    connectionError.value = error instanceof Error ? error.message : String(error);
+    connectionError.value = formatServiceError(error);
   } finally {
     connecting.value = false;
   }

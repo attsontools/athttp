@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use serde::Serialize;
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -45,7 +46,8 @@ impl std::fmt::Display for ServiceClientError {
 
 impl std::error::Error for ServiceClientError {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServiceEvent {
     pub session_id: String,
     pub generation: u64,
@@ -53,11 +55,18 @@ pub struct ServiceEvent {
 }
 
 type PendingResult = Result<Value, ServiceClientError>;
-type PendingRequests = Arc<Mutex<HashMap<String, oneshot::Sender<PendingResult>>>>;
+
+#[derive(Default)]
+struct ClientState {
+    pending: HashMap<String, oneshot::Sender<PendingResult>>,
+    disconnected: Option<ServiceClientError>,
+}
+
+type SharedClientState = Arc<Mutex<ClientState>>;
 
 pub struct ServiceClient {
     writer: Arc<AsyncMutex<OwnedWriteHalf>>,
-    pending: PendingRequests,
+    state: SharedClientState,
     events: broadcast::Sender<ServiceEvent>,
 }
 
@@ -72,10 +81,12 @@ impl ServiceClient {
         let stream = TcpStream::connect(("127.0.0.1", endpoint.port))
             .await
             .map_err(|error| {
-                ServiceClientError::new(
-                    "HTTP_SERVICE_CONNECT_FAILED",
-                    format!("cannot connect to HTTP service: {error}"),
-                )
+                let code = if error.kind() == std::io::ErrorKind::ConnectionRefused {
+                    "HTTP_SERVICE_NOT_RUNNING"
+                } else {
+                    "HTTP_SERVICE_CONNECT_FAILED"
+                };
+                ServiceClientError::new(code, format!("cannot connect to HTTP service: {error}"))
             })?;
         let (reader, mut writer) = stream.into_split();
         let request_id = Uuid::new_v4().to_string();
@@ -131,12 +142,12 @@ impl ServiceClient {
             }
         }
 
-        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let state = Arc::new(Mutex::new(ClientState::default()));
         let (events, _) = broadcast::channel(256);
-        tokio::spawn(read_replies(reader, Arc::clone(&pending), events.clone()));
+        tokio::spawn(read_replies(reader, Arc::clone(&state), events.clone()));
         Ok(Self {
             writer: Arc::new(AsyncMutex::new(writer)),
-            pending,
+            state,
             events,
         })
     }
@@ -157,13 +168,16 @@ impl ServiceClient {
             params,
         };
         let (sender, receiver) = oneshot::channel();
-        self.pending
-            .lock()
-            .expect("pending request mutex poisoned")
-            .insert(request_id.clone(), sender);
+        {
+            let mut state = self.state.lock().expect("client state mutex poisoned");
+            if let Some(error) = &state.disconnected {
+                return Err(error.clone());
+            }
+            state.pending.insert(request_id.clone(), sender);
+        }
         let _pending_guard = PendingGuard {
             request_id: request_id.clone(),
-            pending: Arc::clone(&self.pending),
+            state: Arc::clone(&self.state),
         };
         if let Err(error) = write_json_line(&mut *self.writer.lock().await, &request).await {
             return Err(error);
@@ -181,21 +195,22 @@ impl ServiceClient {
 
 struct PendingGuard {
     request_id: String,
-    pending: PendingRequests,
+    state: SharedClientState,
 }
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        self.pending
+        self.state
             .lock()
-            .expect("pending request mutex poisoned")
+            .expect("client state mutex poisoned")
+            .pending
             .remove(&self.request_id);
     }
 }
 
 async fn read_replies(
     mut reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
-    pending: PendingRequests,
+    state: SharedClientState,
     events: broadcast::Sender<ServiceEvent>,
 ) {
     let mut line = Vec::new();
@@ -222,18 +237,20 @@ async fn read_replies(
         };
         match reply {
             ServiceReply::Response { request_id, result } => {
-                if let Some(sender) = pending
+                if let Some(sender) = state
                     .lock()
-                    .expect("pending request mutex poisoned")
+                    .expect("client state mutex poisoned")
+                    .pending
                     .remove(&request_id)
                 {
                     let _ = sender.send(Ok(result));
                 }
             }
             ServiceReply::Error { request_id, error } => {
-                if let Some(sender) = pending
+                if let Some(sender) = state
                     .lock()
-                    .expect("pending request mutex poisoned")
+                    .expect("client state mutex poisoned")
+                    .pending
                     .remove(&request_id)
                 {
                     let _ = sender.send(Err(ServiceClientError {
@@ -262,12 +279,15 @@ async fn read_replies(
             }
         }
     };
-    let senders = pending
-        .lock()
-        .expect("pending request mutex poisoned")
-        .drain()
-        .map(|(_, sender)| sender)
-        .collect::<Vec<_>>();
+    let senders = {
+        let mut state = state.lock().expect("client state mutex poisoned");
+        state.disconnected = Some(disconnect_error.clone());
+        state
+            .pending
+            .drain()
+            .map(|(_, sender)| sender)
+            .collect::<Vec<_>>()
+    };
     for sender in senders {
         let _ = sender.send(Err(disconnect_error.clone()));
     }
@@ -305,16 +325,20 @@ mod tests {
 
     #[test]
     fn dropping_a_pending_request_guard_removes_the_request() {
-        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let state = Arc::new(Mutex::new(ClientState::default()));
         let (sender, _receiver) = oneshot::channel();
-        pending.lock().unwrap().insert("request-1".into(), sender);
+        state
+            .lock()
+            .unwrap()
+            .pending
+            .insert("request-1".into(), sender);
         let guard = PendingGuard {
             request_id: "request-1".into(),
-            pending: Arc::clone(&pending),
+            state: Arc::clone(&state),
         };
 
         drop(guard);
 
-        assert!(pending.lock().unwrap().is_empty());
+        assert!(state.lock().unwrap().pending.is_empty());
     }
 }

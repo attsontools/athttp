@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { createPluginHost } from '../src/frontend/pluginHost';
 import { createStandaloneHost } from '../src/frontend/standaloneHost';
+import { formatServiceError } from '../src/frontend/transport';
 
 describe('plugin host adapter', () => {
   it('handshakes with the HTTP app id and routes service methods through declared Host APIs', async () => {
@@ -62,6 +63,15 @@ describe('plugin host adapter', () => {
 });
 
 describe('standalone host adapter', () => {
+  it('formats structured service errors for the unavailable state', () => {
+    expect(formatServiceError({
+      code: 'HTTP_SERVICE_VERSION_UNSUPPORTED',
+      message: 'service version mismatch',
+      retryable: false
+    })).toBe('HTTP_SERVICE_VERSION_UNSUPPORTED: service version mismatch');
+    expect(formatServiceError(new Error('network unavailable'))).toBe('network unavailable');
+  });
+
   it('connects once and forwards service requests and events through Tauri commands', async () => {
     let serviceListener: ((event: { payload: unknown }) => void) | undefined;
     const remove = vi.fn();
