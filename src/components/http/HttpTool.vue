@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { NButton, NSelect, useMessage } from 'naive-ui';
-import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useHttpStore } from '../../composables/useHttpStore';
 import { useSidebarWidth } from '../../composables/useSidebarWidth';
 import type { HttpCollection, HttpCollectionRequest, HttpEnvVar, HttpRequestSpec, TabKind } from './types';
@@ -18,6 +17,9 @@ import { isSchemaSpec } from './schemaItem';
 import HttpSyncSettingsModal from './HttpSyncSettingsModal.vue';
 import SseTool from './SseTool.vue';
 import WsTool from './WsTool.vue';
+import type { HttpHost } from '../../frontend/pluginHost';
+
+const props = defineProps<{ host: HttpHost }>();
 
 const store = useHttpStore();
 const message = useMessage();
@@ -122,7 +124,11 @@ async function copyCurrentCurl(template: boolean) {
   const active = store.activeTab.value;
   if (!active || active.kind !== 'http') return;
   const text = toCurl(active.spec as HttpRequestSpec, template ? null : store.varContext.value);
-  try { await writeText(text); } catch {}
+  try {
+    await props.host.copyText(text);
+  } catch (error) {
+    message.error(String((error as Error).message ?? error));
+  }
 }
 
 function onLoadHistory(item: import('./types').HttpHistoryItem, mode: 'active' | 'new') {
@@ -285,6 +291,7 @@ onBeforeUnmount(() => {
             :spec="store.activeTab.value.spec as any"
             :sending="store.activeTab.value.sending"
             :var-context="store.varContext.value"
+            :pick-file="host.pickFile"
             @update:spec="updateSpec"
             @send="() => store.send()"
             @cancel="() => store.cancel()"
@@ -295,6 +302,7 @@ onBeforeUnmount(() => {
             :response="store.activeTab.value.lastResponse"
             :error="store.activeTab.value.lastError"
             :sending="store.activeTab.value.sending"
+            :host="host"
           />
         </template>
         <SseTool v-else-if="store.activeTab.value.kind === 'sse'" :tab="store.activeTab.value" />

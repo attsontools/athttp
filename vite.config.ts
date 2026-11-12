@@ -1,10 +1,21 @@
 /// <reference types="vitest" />
+import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   base: './',
   plugins: [vue()],
+  resolve: {
+    alias: {
+      '@runtime-host': fileURLToPath(new URL(
+        mode === 'plugin'
+          ? './src/frontend/pluginEntry.ts'
+          : './src/frontend/standaloneEntry.ts',
+        import.meta.url
+      ))
+    }
+  },
   clearScreen: false,
   server: {
     strictPort: true,
@@ -20,4 +31,4 @@ export default defineConfig({
   test: {
     exclude: ['**/node_modules/**', '**/dist/**']
   }
-});
+}));

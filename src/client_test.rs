@@ -11,6 +11,21 @@ use tokio::{
 use crate::{write_endpoint, Endpoint, ServiceClient};
 
 #[test]
+fn http_request_timeout_respects_the_user_setting() {
+    assert_eq!(
+        crate::client::request_timeout(
+            "http.send",
+            &json!({ "request": { "timeoutSeconds": 300 } })
+        ),
+        Duration::from_secs(305)
+    );
+    assert_eq!(
+        crate::client::request_timeout("data.tabs.list", &json!({})),
+        Duration::from_secs(30)
+    );
+}
+
+#[test]
 fn stream_message_wire_fields_are_camel_case() {
     let message = crate::http::StreamMessage::WsBinary {
         at_ms: 11,

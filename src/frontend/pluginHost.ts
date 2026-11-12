@@ -4,6 +4,7 @@ export type ThemeName = 'dark' | 'light';
 
 const APP_ID = 'com.attson.http';
 const REQUIRED_CAPABILITIES = [
+  'host.file.save',
   'host.http.request',
   'host.http.stream',
   'host.http.data'
@@ -28,6 +29,9 @@ export interface HttpHost {
   readonly mode: 'standalone' | 'plugin';
   readonly transport: ServiceTransport;
   initialize(onTheme: (theme: ThemeName) => void): Promise<ThemeName>;
+  pickFile(): Promise<string | null>;
+  copyText(text: string): Promise<void>;
+  saveFile(input: { suggestedName: string; content: string }): Promise<boolean>;
   dispose(): void;
 }
 
@@ -70,6 +74,30 @@ export function createPluginHost(connect: ConnectPlugin): HttpHost {
         for (const listener of streamListeners) listener(event);
       });
       return handshake.theme;
+    },
+    async pickFile() {
+      if (!connection) throw new Error('HTTP_SERVICE_DISCONNECTED');
+      const result = await connection.call<unknown>('host.http.pickFile', {});
+      if (typeof result !== 'object' || result === null) throw new Error('HOST_FILE_PICK_INVALID');
+      const selection = result as { cancelled?: unknown; token?: unknown };
+      if (selection.cancelled === true) return null;
+      if (typeof selection.token !== 'string' || !selection.token) {
+        throw new Error('HOST_FILE_PICK_INVALID');
+      }
+      return selection.token;
+    },
+    async copyText(text) {
+      if (!connection) throw new Error('HTTP_SERVICE_DISCONNECTED');
+      await connection.call('host.http.copyText', { text });
+    },
+    async saveFile(input) {
+      if (!connection) throw new Error('HTTP_SERVICE_DISCONNECTED');
+      const result = await connection.call<unknown>('host.file.save', {
+        ...input,
+        encoding: 'utf8'
+      });
+      if (typeof result !== 'object' || result === null) throw new Error('HOST_FILE_SAVE_INVALID');
+      return (result as { cancelled?: unknown }).cancelled !== true;
     },
     dispose() {
       removeThemeListener?.();

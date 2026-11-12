@@ -25,16 +25,7 @@ impl HttpStore {
             .unwrap_or(false);
         let connection = Connection::open(&database_path)
             .map_err(|error| format!("打开 HTTP 数据库失败：{error}"))?;
-        let needs_migration = database_existed
-            && (!has_column(&connection, "http_tabs", "kind")?
-                || !has_table(&connection, "http_history")?
-                || !has_table(&connection, "http_envs")?
-                || !has_table(&connection, "http_env_vars")?
-                || !has_table(&connection, "http_collections")?
-                || !has_table(&connection, "http_collection_folders")?
-                || !has_column(&connection, "http_collections", "source_url")?
-                || !has_column(&connection, "http_collection_requests", "source_key")?);
-        if needs_migration {
+        if database_existed {
             let backup_path = root_directory.join("http.sqlite3.pre-service-v1.bak");
             if !backup_path.exists() {
                 connection
@@ -638,16 +629,6 @@ fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool
     Ok(names.iter().any(|name| name == column))
 }
 
-fn has_table(connection: &Connection, table: &str) -> Result<bool, String> {
-    connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
-            [table],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(map_error)
-}
-
 fn ensure_columns(
     connection: &Connection,
     table: &str,
@@ -665,4 +646,22 @@ fn ensure_columns(
 
 fn map_error(error: rusqlite::Error) -> String {
     format!("HTTP 数据库操作失败：{error}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HttpStore;
+
+    #[test]
+    fn backs_up_an_existing_current_schema_on_first_service_takeover() {
+        let directory = tempfile::tempdir().unwrap();
+        drop(HttpStore::new(directory.path().to_path_buf()).unwrap());
+        let backup = directory.path().join("http.sqlite3.pre-service-v1.bak");
+        assert!(!backup.exists());
+
+        drop(HttpStore::new(directory.path().to_path_buf()).unwrap());
+
+        assert!(backup.exists());
+        assert!(backup.metadata().unwrap().len() > 0);
+    }
 }

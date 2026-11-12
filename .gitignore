@@ -5,6 +5,7 @@
 /node_modules/
 /dist/
 /dist-plugin/
+/artifacts/
 /coverage/
 .DS_Store
 

@@ -9,6 +9,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::Notify,
+    task::JoinSet,
     time::{timeout, Duration},
 };
 use uuid::Uuid;
@@ -19,7 +20,8 @@ use crate::{
     ServiceReply, ServiceRequest,
 };
 
-const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_HANDSHAKE_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_BUSINESS_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct ServiceServer {
     listener: TcpListener,
@@ -227,10 +229,13 @@ async fn handle_connection(
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut frame = Vec::new();
-    let read = timeout(Duration::from_secs(10), read_frame(&mut reader, &mut frame))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))??;
-    if read == 0 || frame.len() > MAX_FRAME_BYTES || frame.last() != Some(&b'\n') {
+    let read = timeout(
+        Duration::from_secs(10),
+        read_frame(&mut reader, &mut frame, MAX_HANDSHAKE_FRAME_BYTES),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))??;
+    if read == 0 || frame.len() > MAX_HANDSHAKE_FRAME_BYTES || frame.last() != Some(&b'\n') {
         return Ok(());
     }
     let reply = match serde_json::from_slice::<ServiceHandshake>(&frame) {
@@ -259,10 +264,42 @@ async fn handle_connection(
     }
 
     let mut events = service.stream_state().subscribe();
+    let mut requests = JoinSet::new();
     loop {
         frame.clear();
-        let read = tokio::select! {
-            read = read_frame(&mut reader, &mut frame) => read?,
+        tokio::select! {
+            read = read_frame(&mut reader, &mut frame, MAX_BUSINESS_FRAME_BYTES) => {
+                let read = read?;
+                if read == 0 {
+                    return Ok(());
+                }
+                if frame.len() > MAX_BUSINESS_FRAME_BYTES || frame.last() != Some(&b'\n') {
+                    return Ok(());
+                }
+                let request = match serde_json::from_slice::<ServiceRequest>(&frame) {
+                    Ok(ServiceRequest::Request {
+                        request_id,
+                        method,
+                        params,
+                    }) => (request_id, method, params),
+                    Err(_) => {
+                        let error = ServiceReply::Error {
+                            request_id: String::new(),
+                            error: ErrorEnvelope::from(ServiceError::new(
+                                "HTTP_SERVICE_REQUEST_INVALID",
+                                "expected a service request",
+                            )),
+                        };
+                        write_reply(&mut write_half, error).await?;
+                        continue;
+                    }
+                };
+                let service = Arc::clone(&service);
+                requests.spawn(async move {
+                    let (request_id, method, params) = request;
+                    dispatch_request(&service, &method, params, &request_id).await
+                });
+            }
             event = events.recv() => {
                 match event {
                     Ok(event) => write_reply(&mut write_half, ServiceReply::Event {
@@ -273,44 +310,28 @@ async fn handle_connection(
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
                 }
-                continue;
             }
-        };
-        if read == 0 {
-            return Ok(());
-        }
-        if frame.len() > MAX_FRAME_BYTES || frame.last() != Some(&b'\n') {
-            return Ok(());
-        }
-        let request = match serde_json::from_slice::<ServiceRequest>(&frame) {
-            Ok(ServiceRequest::Request {
-                request_id,
-                method,
-                params,
-            }) => (request_id, method, params),
-            Err(_) => {
-                let error = ServiceReply::Error {
-                    request_id: String::new(),
-                    error: ErrorEnvelope::from(ServiceError::new(
-                        "HTTP_SERVICE_REQUEST_INVALID",
-                        "expected a service request",
-                    )),
-                };
-                write_reply(&mut write_half, error).await?;
-                continue;
+            completed = requests.join_next(), if !requests.is_empty() => {
+                match completed {
+                    Some(Ok(reply)) => write_reply(&mut write_half, reply).await?,
+                    Some(Err(error)) => {
+                        return Err(io::Error::other(format!(
+                            "service request task failed: {error}"
+                        )));
+                    }
+                    None => {}
+                }
             }
-        };
-        let (request_id, method, params) = request;
-        let reply = dispatch_request(&service, &method, params, &request_id).await;
-        write_reply(&mut write_half, reply).await?;
+        }
     }
 }
 
 async fn read_frame(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     frame: &mut Vec<u8>,
+    max_bytes: usize,
 ) -> io::Result<usize> {
-    let mut limited = reader.take((MAX_FRAME_BYTES + 1) as u64);
+    let mut limited = reader.take((max_bytes + 1) as u64);
     limited.read_until(b'\n', frame).await
 }
 
@@ -978,6 +999,81 @@ mod tests {
         assert_eq!(send_reply["kind"], "error");
         assert_eq!(send_reply["requestId"], "http-slow");
         assert_eq!(send_reply["error"]["code"], "HTTP_REQUEST_CANCELLED");
+
+        stop.notify_one();
+        task.await.unwrap().unwrap();
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn cancels_an_in_flight_http_request_from_the_same_client() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (_stream, _) = upstream.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let data_directory = directory.path().display().to_string();
+        let server = ServiceServer::bind(
+            directory.path().join("service.endpoint.json"),
+            data_directory.clone(),
+            "0.1.0-alpha.0",
+        )
+        .await
+        .unwrap();
+        let endpoint = server.endpoint().clone();
+        let stop = server.stop_handle();
+        let task = tokio::spawn(server.run());
+        let mut client = connect_and_handshake(&endpoint, &data_directory, "single-client").await;
+
+        for request in [
+            serde_json::json!({
+                "kind": "request",
+                "requestId": "http-slow",
+                "method": "http.send",
+                "params": {
+                    "request": {
+                        "method": "GET",
+                        "url": format!("http://{upstream_address}/slow"),
+                        "timeoutSeconds": 5
+                    },
+                    "cancelTokenId": "cancel-slow"
+                }
+            }),
+            serde_json::json!({
+                "kind": "request",
+                "requestId": "cancel-1",
+                "method": "http.cancel",
+                "params": { "cancelTokenId": "cancel-slow" }
+            }),
+        ] {
+            let mut bytes = serde_json::to_vec(&request).unwrap();
+            bytes.push(b'\n');
+            client.get_mut().write_all(&bytes).await.unwrap();
+            if request["requestId"] == "http-slow" {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        let replies = tokio::time::timeout(Duration::from_millis(500), async {
+            let mut replies = std::collections::HashMap::new();
+            for _ in 0..2 {
+                let mut line = Vec::new();
+                client.read_until(b'\n', &mut line).await.unwrap();
+                let reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
+                replies.insert(reply["requestId"].as_str().unwrap().to_string(), reply);
+            }
+            replies
+        })
+        .await
+        .expect("same-client cancellation must not wait for the HTTP request");
+
+        assert_eq!(replies["cancel-1"]["result"]["cancelled"], true);
+        assert_eq!(
+            replies["http-slow"]["error"]["code"],
+            "HTTP_REQUEST_CANCELLED"
+        );
 
         stop.notify_one();
         task.await.unwrap().unwrap();

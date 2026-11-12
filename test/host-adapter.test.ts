@@ -6,12 +6,16 @@ import { formatServiceError } from '../src/frontend/transport';
 
 describe('plugin host adapter', () => {
   it('handshakes with the HTTP app id and routes service methods through declared Host APIs', async () => {
-    const call = vi.fn(async (_method: string, _params?: unknown) => null);
+    const call = vi.fn(async (method: string, _params?: unknown) => {
+      if (method === 'host.http.pickFile') return { cancelled: false, token: 'host-file-token' };
+      if (method === 'host.file.save') return { cancelled: false };
+      return null;
+    });
     const close = vi.fn();
     const connect = vi.fn(async () => ({
       handshake: async () => ({
         theme: 'dark' as const,
-        capabilities: ['host.http.request', 'host.http.stream', 'host.http.data']
+        capabilities: ['host.file.save', 'host.http.request', 'host.http.stream', 'host.http.data']
       }),
       async call<T>(method: string, params?: unknown): Promise<T> {
         return await call(method, params) as T;
@@ -40,6 +44,15 @@ describe('plugin host adapter', () => {
     expect(call).toHaveBeenNthCalledWith(3, 'host.http.stream', {
       method: 'stream.snapshot',
       params: { sessionId: 'session-1' }
+    });
+
+    await expect(host.pickFile()).resolves.toBe('host-file-token');
+    expect(call).toHaveBeenNthCalledWith(4, 'host.http.pickFile', {});
+    await host.copyText('curl example.com');
+    expect(call).toHaveBeenNthCalledWith(5, 'host.http.copyText', { text: 'curl example.com' });
+    await host.saveFile({ suggestedName: 'response.txt', content: 'ok' });
+    expect(call).toHaveBeenNthCalledWith(6, 'host.file.save', {
+      suggestedName: 'response.txt', content: 'ok', encoding: 'utf8'
     });
 
     host.dispose();
@@ -87,7 +100,10 @@ describe('standalone host adapter', () => {
         serviceListener = listener;
         return remove;
       }),
-      storage: { getItem: () => 'light' }
+      storage: { getItem: () => 'light' },
+      pickFile: vi.fn(async () => '/tmp/request.txt'),
+      copyText: vi.fn(async () => {}),
+      saveFile: vi.fn(async () => true)
     });
     const onTheme = vi.fn();
     const onEvent = vi.fn();

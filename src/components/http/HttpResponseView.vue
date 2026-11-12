@@ -1,16 +1,17 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { NButton, NTabs, NTabPane } from 'naive-ui';
-import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { save } from '@tauri-apps/plugin-dialog';
-import { invoke } from '@tauri-apps/api/core';
+import { NButton, NTabs, NTabPane, useMessage } from 'naive-ui';
+import type { HttpHost } from '../../frontend/pluginHost';
 import type { HttpResponseInfo } from './types';
 
 const props = defineProps<{
   response: HttpResponseInfo | null;
   error: string | null;
   sending: boolean;
+  host: Pick<HttpHost, 'copyText' | 'saveFile'>;
 }>();
+
+const message = useMessage();
 
 const respTab = ref('body');
 const bodyView = ref<'pretty' | 'raw' | 'preview'>('pretty');
@@ -80,30 +81,27 @@ function formatSize(bytes: number): string {
 async function copyBody() {
   if (!props.response) return;
   try {
-    await writeText(bodyView.value === 'raw' ? rawBody.value : prettyBody.value);
-  } catch {}
+    await props.host.copyText(bodyView.value === 'raw' ? rawBody.value : prettyBody.value);
+  } catch (error) {
+    message.error(String((error as Error).message ?? error));
+  }
 }
 
 async function copyUrl() {
   if (!props.response) return;
   try {
-    await writeText(props.response.finalUrl);
-  } catch {}
+    await props.host.copyText(props.response.finalUrl);
+  } catch (error) {
+    message.error(String((error as Error).message ?? error));
+  }
 }
 
 async function saveBody() {
   if (!props.response) return;
-  const path = await save({ defaultPath: 'response.txt' });
-  if (!path) return;
   try {
-    const bytes = new TextEncoder().encode(rawBody.value);
-    // btoa 需要单字节字符串
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    const b64 = btoa(binary);
-    await invoke('write_binary_file', { path, base64: b64 });
-  } catch (err) {
-    console.warn('save failed', err);
+    await props.host.saveFile({ suggestedName: 'response.txt', content: rawBody.value });
+  } catch (error) {
+    message.error(String((error as Error).message ?? error));
   }
 }
 

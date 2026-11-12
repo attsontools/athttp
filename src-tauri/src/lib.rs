@@ -35,6 +35,13 @@ async fn http_service_request(
     service.request(method, params).await
 }
 
+#[tauri::command]
+async fn write_text_file(path: String, content: String) -> Result<(), String> {
+    tokio::fs::write(path, content)
+        .await
+        .map_err(|error| format!("保存响应失败：{error}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -57,7 +64,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             connect_http_service,
-            http_service_request
+            http_service_request,
+            write_text_file
         ])
         .run(tauri::generate_context!())
         .expect("failed to run HTTP 请求");

@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1426",
     "build": "tsc --noEmit && vite build",
+    "build:plugin": "tsc --noEmit && vite build --mode plugin --outDir dist-plugin",
+    "package:plugin": "pnpm build:plugin && node scripts/package-plugin.mjs",
     "test": "vitest run",
     "stage:service": "node scripts/stage-service.mjs",
     "tauri": "tauri",

@@ -8,9 +8,9 @@ import {
   NSelect,
   NTabs,
   NTabPane,
-  NModal
+  NModal,
+  useMessage
 } from 'naive-ui';
-import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import type { HttpRequestSpec, HttpMethod, KV, MultipartField } from './types';
 import type { VarContext } from './variables';
 import { collectUnknownVars } from './variables';
@@ -21,7 +21,10 @@ const props = defineProps<{
   spec: HttpRequestSpec;
   sending: boolean;
   varContext: VarContext;
+  pickFile(): Promise<string | null>;
 }>();
+
+const message = useMessage();
 
 const emit = defineEmits<{
   (e: 'update:spec', v: HttpRequestSpec): void;
@@ -158,10 +161,14 @@ function updateAuthField(k: 'bearerToken' | 'basicUser' | 'basicPass', v: string
 
 // ---- Multipart ----
 async function pickFile(idx: number) {
-  const selected = await openFileDialog({ multiple: false });
-  if (!selected || typeof selected !== 'string') return;
-  const next = props.spec.multipartFields.map((f, i) => (i === idx ? { ...f, value: selected } : f));
-  spec.value = { ...props.spec, multipartFields: next };
+  try {
+    const selected = await props.pickFile();
+    if (!selected) return;
+    const next = props.spec.multipartFields.map((f, i) => (i === idx ? { ...f, value: selected } : f));
+    spec.value = { ...props.spec, multipartFields: next };
+  } catch (error) {
+    message.error(String((error as Error).message ?? error));
+  }
 }
 function addMultipartField() {
   const next: MultipartField[] = [

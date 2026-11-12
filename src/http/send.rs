@@ -101,7 +101,7 @@ pub async fn send(
                         .unwrap_or_else(|| field.key.clone());
                     let bytes = tokio::fs::read(path)
                         .await
-                        .map_err(|error| format!("读取文件 {} 失败：{error}", field.value))?;
+                        .map_err(|error| format!("读取文件 {filename} 失败：{error}"))?;
                     form = form.part(
                         field.key.clone(),
                         multipart::Part::bytes(bytes).file_name(filename),
@@ -158,4 +158,43 @@ pub async fn send(
         elapsed_ms: started.elapsed().as_millis(),
         final_url,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::send;
+    use crate::http::models::{HttpAuth, HttpRequestSpec, MultipartField};
+
+    #[tokio::test]
+    async fn multipart_read_errors_do_not_expose_the_local_path() {
+        let private_path = "/private/host/selected/secret.txt";
+        let error = send(
+            HttpRequestSpec {
+                method: "POST".into(),
+                url: "http://127.0.0.1/".into(),
+                headers: vec![],
+                query_params: vec![],
+                auth: HttpAuth::default(),
+                body_type: "multipart".into(),
+                body: String::new(),
+                multipart_fields: vec![MultipartField {
+                    key: "upload".into(),
+                    kind: "file".into(),
+                    value: private_path.into(),
+                    enabled: true,
+                }],
+                timeout_seconds: Some(1),
+                follow_redirects: true,
+                verify_ssl: true,
+            },
+            None,
+            None,
+        )
+        .await
+        .expect_err("the selected file does not exist");
+
+        assert!(error.contains("secret.txt"));
+        assert!(!error.contains(private_path));
+        assert!(!error.contains("/private/host"));
+    }
 }

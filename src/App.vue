@@ -45,7 +45,7 @@ function applyTheme(value: ThemeName) {
           <strong>无法启动 HTTP 请求</strong>
           <span>{{ connectionError }}</span>
         </div>
-        <HttpTool v-else />
+        <HttpTool v-else :host="host" />
       </main>
     </n-message-provider>
   </n-config-provider>

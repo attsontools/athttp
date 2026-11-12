@@ -19,7 +19,7 @@ use crate::{
     ServiceRequest, APP_ID, DATA_API, HOST_API, SERVICE_API,
 };
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceClientError {
@@ -161,10 +161,12 @@ impl ServiceClient {
         method: impl Into<String>,
         params: Value,
     ) -> Result<Value, ServiceClientError> {
+        let method = method.into();
+        let request_timeout = request_timeout(&method, &params);
         let request_id = Uuid::new_v4().to_string();
         let request = ServiceRequest::Request {
             request_id: request_id.clone(),
-            method: method.into(),
+            method,
             params,
         };
         let (sender, receiver) = oneshot::channel();
@@ -182,7 +184,7 @@ impl ServiceClient {
         if let Err(error) = write_json_line(&mut *self.writer.lock().await, &request).await {
             return Err(error);
         }
-        match timeout(REQUEST_TIMEOUT, receiver).await {
+        match timeout(request_timeout, receiver).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(disconnected()),
             Err(_) => Err(ServiceClientError::new(
@@ -191,6 +193,19 @@ impl ServiceClient {
             )),
         }
     }
+}
+
+pub(crate) fn request_timeout(method: &str, params: &Value) -> Duration {
+    if method != "http.send" {
+        return DEFAULT_REQUEST_TIMEOUT;
+    }
+    let seconds = params
+        .get("request")
+        .and_then(|request| request.get("timeoutSeconds"))
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT.as_secs())
+        .clamp(1, 300);
+    Duration::from_secs(seconds + 5)
 }
 
 struct PendingGuard {
