@@ -31,6 +31,9 @@ impl ServiceServer {
         data_directory: impl Into<String>,
         service_version: impl Into<String>,
     ) -> Result<Self, ServiceError> {
+        let data_directory = data_directory.into();
+        let service = HttpService::new(PathBuf::from(&data_directory))
+            .map_err(|error| ServiceError::new("HTTP_DATA_MIGRATION_FAILED", error))?;
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|error| {
             ServiceError::new(
                 "HTTP_SERVICE_BIND_FAILED",
@@ -53,10 +56,10 @@ impl ServiceServer {
         Ok(Self {
             listener,
             endpoint_path,
-            data_directory: data_directory.into(),
+            data_directory,
             endpoint,
             stop: Arc::new(Notify::new()),
-            service: Arc::new(HttpService::default()),
+            service: Arc::new(service),
         })
     }
 
@@ -235,6 +238,45 @@ async fn dispatch_request(
                 "cancelled": service.cancel_state().cancel(token_id)
             }))
         }
+        "data.tabs.list" => service
+            .store()
+            .list_tabs()
+            .and_then(|rows| serde_json::to_value(rows).map_err(|error| error.to_string()))
+            .map_err(|error| ServiceError::new("HTTP_DATA_READ_FAILED", error)),
+        "data.tabs.upsert" => {
+            let row = params
+                .get("row")
+                .cloned()
+                .ok_or_else(|| "row is required".to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<http::HttpTabRow>(value)
+                        .map_err(|error| format!("invalid tab row: {error}"))
+                });
+            match row {
+                Ok(row) => service
+                    .store()
+                    .upsert_tab(row)
+                    .map(|()| serde_json::Value::Null)
+                    .map_err(|error| ServiceError::new("HTTP_DATA_WRITE_FAILED", error)),
+                Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+            }
+        }
+        "data.tabs.delete" => match required_string(&params, "id") {
+            Ok(id) => service
+                .store()
+                .delete_tab(id)
+                .map(|()| serde_json::Value::Null)
+                .map_err(|error| ServiceError::new("HTTP_DATA_WRITE_FAILED", error)),
+            Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+        },
+        "data.tabs.setActive" => match required_string(&params, "id") {
+            Ok(id) => service
+                .store()
+                .set_active_tab(id)
+                .map(|()| serde_json::Value::Null)
+                .map_err(|error| ServiceError::new("HTTP_DATA_WRITE_FAILED", error)),
+            Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+        },
         _ => Err(ServiceError::new(
             "HTTP_SERVICE_METHOD_NOT_FOUND",
             format!("unknown service method: {method}"),
@@ -250,6 +292,14 @@ async fn dispatch_request(
             error: ErrorEnvelope::from(error),
         },
     }
+}
+
+fn required_string<'a>(params: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
+    params
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{key} is required"))
 }
 
 async fn write_reply(
@@ -528,5 +578,202 @@ mod tests {
         stop.notify_one();
         task.await.unwrap().unwrap();
         upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn shares_tabs_between_two_service_clients() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_directory = directory.path().display().to_string();
+        let server = ServiceServer::bind(
+            directory.path().join("service.endpoint.json"),
+            data_directory.clone(),
+            "0.1.0-alpha.0",
+        )
+        .await
+        .unwrap();
+        let endpoint = server.endpoint().clone();
+        let stop = server.stop_handle();
+        let task = tokio::spawn(server.run());
+        let mut writer = connect_and_handshake(&endpoint, &data_directory, "writer").await;
+        let mut reader = connect_and_handshake(&endpoint, &data_directory, "reader").await;
+
+        let upsert = serde_json::json!({
+            "kind": "request",
+            "requestId": "tab-upsert-1",
+            "method": "data.tabs.upsert",
+            "params": {
+                "row": {
+                    "id": "tab-1",
+                    "title": "Shared request",
+                    "orderIndex": 0,
+                    "isActive": true,
+                    "specJson": "{}",
+                    "updatedAt": 1_797_000_000_000_i64,
+                    "kind": "http"
+                }
+            }
+        });
+        let mut bytes = serde_json::to_vec(&upsert).unwrap();
+        bytes.push(b'\n');
+        writer.get_mut().write_all(&bytes).await.unwrap();
+        let mut line = Vec::new();
+        writer.read_until(b'\n', &mut line).await.unwrap();
+        let upsert_reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(upsert_reply["kind"], "response", "{upsert_reply}");
+
+        let list = serde_json::json!({
+            "kind": "request",
+            "requestId": "tab-list-1",
+            "method": "data.tabs.list",
+            "params": {}
+        });
+        bytes = serde_json::to_vec(&list).unwrap();
+        bytes.push(b'\n');
+        reader.get_mut().write_all(&bytes).await.unwrap();
+        line.clear();
+        reader.read_until(b'\n', &mut line).await.unwrap();
+        let list_reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(list_reply["kind"], "response", "{list_reply}");
+        assert_eq!(list_reply["result"][0]["id"], "tab-1");
+        assert_eq!(list_reply["result"][0]["title"], "Shared request");
+
+        stop.notify_one();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn activates_and_deletes_tabs_through_data_api() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_directory = directory.path().display().to_string();
+        let server = ServiceServer::bind(
+            directory.path().join("service.endpoint.json"),
+            data_directory.clone(),
+            "0.1.0-alpha.0",
+        )
+        .await
+        .unwrap();
+        server
+            .service
+            .store()
+            .upsert_tab(http::HttpTabRow {
+                id: "tab-1".into(),
+                title: "One".into(),
+                order_index: 0,
+                is_active: true,
+                spec_json: "{}".into(),
+                updated_at: 1,
+                kind: "http".into(),
+            })
+            .unwrap();
+        server
+            .service
+            .store()
+            .upsert_tab(http::HttpTabRow {
+                id: "tab-2".into(),
+                title: "Two".into(),
+                order_index: 1,
+                is_active: false,
+                spec_json: "{}".into(),
+                updated_at: 2,
+                kind: "http".into(),
+            })
+            .unwrap();
+        let endpoint = server.endpoint().clone();
+        let stop = server.stop_handle();
+        let task = tokio::spawn(server.run());
+        let mut client = connect_and_handshake(&endpoint, &data_directory, "tab-manager").await;
+
+        for request in [
+            serde_json::json!({
+                "kind": "request",
+                "requestId": "activate-2",
+                "method": "data.tabs.setActive",
+                "params": { "id": "tab-2" }
+            }),
+            serde_json::json!({
+                "kind": "request",
+                "requestId": "delete-1",
+                "method": "data.tabs.delete",
+                "params": { "id": "tab-1" }
+            }),
+        ] {
+            let mut bytes = serde_json::to_vec(&request).unwrap();
+            bytes.push(b'\n');
+            client.get_mut().write_all(&bytes).await.unwrap();
+            let mut line = Vec::new();
+            client.read_until(b'\n', &mut line).await.unwrap();
+            let reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            assert_eq!(reply["kind"], "response", "{reply}");
+        }
+
+        let rows = task_store_rows(&endpoint, &data_directory).await;
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["id"], "tab-2");
+        assert_eq!(rows[0]["isActive"], true);
+
+        stop.notify_one();
+        task.await.unwrap().unwrap();
+    }
+
+    async fn task_store_rows(endpoint: &Endpoint, data_directory: &str) -> serde_json::Value {
+        let mut client = connect_and_handshake(endpoint, data_directory, "tab-list-check").await;
+        let request = serde_json::json!({
+            "kind": "request",
+            "requestId": "list-check",
+            "method": "data.tabs.list",
+            "params": {}
+        });
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        client.get_mut().write_all(&bytes).await.unwrap();
+        let mut line = Vec::new();
+        client.read_until(b'\n', &mut line).await.unwrap();
+        serde_json::from_slice::<serde_json::Value>(&line).unwrap()["result"].clone()
+    }
+
+    #[tokio::test]
+    async fn migrates_and_backs_up_legacy_tabs_without_losing_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("http.sqlite3");
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE http_tabs (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    order_index INTEGER NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 0,
+                    spec_json TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO http_tabs VALUES ('legacy-tab', 'Legacy', 0, 1, '{}', 10);
+                "#,
+            )
+            .unwrap();
+        drop(connection);
+
+        let data_directory = directory.path().display().to_string();
+        let server = ServiceServer::bind(
+            directory.path().join("service.endpoint.json"),
+            data_directory.clone(),
+            "0.1.0-alpha.0",
+        )
+        .await
+        .unwrap();
+        let endpoint = server.endpoint().clone();
+        let stop = server.stop_handle();
+        let task = tokio::spawn(server.run());
+        let rows = task_store_rows(&endpoint, &data_directory).await;
+
+        assert_eq!(rows[0]["id"], "legacy-tab");
+        assert_eq!(rows[0]["kind"], "http");
+        assert!(directory
+            .path()
+            .join("http.sqlite3.pre-service-v1.bak")
+            .exists());
+
+        stop.notify_one();
+        task.await.unwrap().unwrap();
     }
 }

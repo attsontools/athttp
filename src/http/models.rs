@@ -90,3 +90,20 @@ pub struct HttpResponseInfo {
     pub elapsed_ms: u128,
     pub final_url: String,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpTabRow {
+    pub id: String,
+    pub title: String,
+    pub order_index: i64,
+    pub is_active: bool,
+    pub spec_json: String,
+    pub updated_at: i64,
+    #[serde(default = "default_kind")]
+    pub kind: String,
+}
+
+fn default_kind() -> String {
+    "http".to_string()
+}
