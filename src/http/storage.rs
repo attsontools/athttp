@@ -2,7 +2,10 @@ use std::{fs, path::PathBuf, sync::Mutex};
 
 use rusqlite::{params, Connection};
 
-use super::{HttpEnvRow, HttpEnvVarRow, HttpHistoryRow, HttpTabRow};
+use super::{
+    HttpCollectionFolderRow, HttpCollectionRequestRow, HttpCollectionRow, HttpEnvRow,
+    HttpEnvVarRow, HttpHistoryRow, HttpTabRow,
+};
 
 const HISTORY_MAX_ROWS: i64 = 500;
 const HISTORY_MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -26,7 +29,11 @@ impl HttpStore {
             && (!has_column(&connection, "http_tabs", "kind")?
                 || !has_table(&connection, "http_history")?
                 || !has_table(&connection, "http_envs")?
-                || !has_table(&connection, "http_env_vars")?);
+                || !has_table(&connection, "http_env_vars")?
+                || !has_table(&connection, "http_collections")?
+                || !has_table(&connection, "http_collection_folders")?
+                || !has_column(&connection, "http_collections", "source_url")?
+                || !has_column(&connection, "http_collection_requests", "source_key")?);
         if needs_migration {
             let backup_path = root_directory.join("http.sqlite3.pre-service-v1.bak");
             if !backup_path.exists() {
@@ -82,10 +89,65 @@ impl HttpStore {
                     updated_at INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_http_env_vars_env ON http_env_vars(env_id);
+
+                CREATE TABLE IF NOT EXISTS http_collections (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    order_index INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    source_url TEXT,
+                    source_headers_json TEXT,
+                    sync_interval_secs INTEGER,
+                    last_synced_at INTEGER,
+                    last_sync_error TEXT,
+                    base_url TEXT
+                );
+                CREATE TABLE IF NOT EXISTS http_collection_folders (
+                    id TEXT PRIMARY KEY,
+                    collection_id TEXT NOT NULL,
+                    parent_id TEXT,
+                    name TEXT NOT NULL,
+                    order_index INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_http_collection_folders_collection
+                    ON http_collection_folders(collection_id);
+                CREATE TABLE IF NOT EXISTS http_collection_requests (
+                    id TEXT PRIMARY KEY,
+                    collection_id TEXT NOT NULL,
+                    folder_id TEXT,
+                    name TEXT NOT NULL,
+                    method TEXT NOT NULL,
+                    spec_json TEXT NOT NULL,
+                    order_index INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    source_key TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_http_collection_requests_collection
+                    ON http_collection_requests(collection_id);
+                CREATE INDEX IF NOT EXISTS idx_http_collection_requests_folder
+                    ON http_collection_requests(folder_id);
                 "#,
             )
             .map_err(|error| format!("初始化 HTTP 数据库失败：{error}"))?;
         ensure_kind_column(&connection)?;
+        ensure_columns(
+            &connection,
+            "http_collections",
+            &[
+                ("source_url", "source_url TEXT"),
+                ("source_headers_json", "source_headers_json TEXT"),
+                ("sync_interval_secs", "sync_interval_secs INTEGER"),
+                ("last_synced_at", "last_synced_at INTEGER"),
+                ("last_sync_error", "last_sync_error TEXT"),
+                ("base_url", "base_url TEXT"),
+            ],
+        )?;
+        ensure_columns(
+            &connection,
+            "http_collection_requests",
+            &[("source_key", "source_key TEXT")],
+        )?;
         let integrity: String = connection
             .query_row("PRAGMA quick_check", [], |row| row.get(0))
             .map_err(|error| format!("检查 HTTP 数据库失败：{error}"))?;
@@ -377,6 +439,176 @@ impl HttpStore {
         Ok(())
     }
 
+    pub fn list_collections(&self) -> Result<Vec<HttpCollectionRow>, String> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, name, order_index, updated_at, source_url, source_headers_json, \
+                    sync_interval_secs, last_synced_at, last_sync_error, base_url \
+             FROM http_collections ORDER BY order_index ASC, updated_at ASC",
+            )
+            .map_err(map_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(HttpCollectionRow {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    order_index: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    source_url: row.get(4)?,
+                    source_headers_json: row.get(5)?,
+                    sync_interval_secs: row.get(6)?,
+                    last_synced_at: row.get(7)?,
+                    last_sync_error: row.get(8)?,
+                    base_url: row.get(9)?,
+                })
+            })
+            .map_err(map_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_error)?;
+        Ok(rows)
+    }
+
+    pub fn list_collection_folders(&self) -> Result<Vec<HttpCollectionFolderRow>, String> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, collection_id, parent_id, name, order_index, updated_at \
+             FROM http_collection_folders ORDER BY collection_id, order_index, updated_at",
+            )
+            .map_err(map_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(HttpCollectionFolderRow {
+                    id: row.get(0)?,
+                    collection_id: row.get(1)?,
+                    parent_id: row.get(2)?,
+                    name: row.get(3)?,
+                    order_index: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            })
+            .map_err(map_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_error)?;
+        Ok(rows)
+    }
+
+    pub fn list_collection_requests(&self) -> Result<Vec<HttpCollectionRequestRow>, String> {
+        let connection = self.connection();
+        let mut statement = connection.prepare(
+            "SELECT id, collection_id, folder_id, name, method, spec_json, order_index, updated_at, source_key \
+             FROM http_collection_requests ORDER BY collection_id, folder_id, order_index, updated_at",
+        ).map_err(map_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(HttpCollectionRequestRow {
+                    id: row.get(0)?,
+                    collection_id: row.get(1)?,
+                    folder_id: row.get(2)?,
+                    name: row.get(3)?,
+                    method: row.get(4)?,
+                    spec_json: row.get(5)?,
+                    order_index: row.get(6)?,
+                    updated_at: row.get(7)?,
+                    source_key: row.get(8)?,
+                })
+            })
+            .map_err(map_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_error)?;
+        Ok(rows)
+    }
+
+    pub fn upsert_collection(&self, row: HttpCollectionRow) -> Result<(), String> {
+        self.connection().execute(
+            "INSERT INTO http_collections (id, name, order_index, updated_at, source_url, source_headers_json, \
+             sync_interval_secs, last_synced_at, last_sync_error, base_url) VALUES \
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT(id) DO UPDATE SET \
+             name=excluded.name, order_index=excluded.order_index, updated_at=excluded.updated_at, \
+             source_url=excluded.source_url, source_headers_json=excluded.source_headers_json, \
+             sync_interval_secs=excluded.sync_interval_secs, last_synced_at=excluded.last_synced_at, \
+             last_sync_error=excluded.last_sync_error, base_url=excluded.base_url",
+            params![row.id, row.name, row.order_index, row.updated_at, row.source_url,
+                row.source_headers_json, row.sync_interval_secs, row.last_synced_at,
+                row.last_sync_error, row.base_url],
+        ).map_err(map_error)?;
+        Ok(())
+    }
+
+    pub fn upsert_collection_folder(&self, row: HttpCollectionFolderRow) -> Result<(), String> {
+        self.connection().execute(
+            "INSERT INTO http_collection_folders (id, collection_id, parent_id, name, order_index, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET \
+             collection_id=excluded.collection_id, parent_id=excluded.parent_id, name=excluded.name, \
+             order_index=excluded.order_index, updated_at=excluded.updated_at",
+            params![row.id, row.collection_id, row.parent_id, row.name, row.order_index, row.updated_at],
+        ).map_err(map_error)?;
+        Ok(())
+    }
+
+    pub fn upsert_collection_request(&self, row: HttpCollectionRequestRow) -> Result<(), String> {
+        self.connection().execute(
+            "INSERT INTO http_collection_requests (id, collection_id, folder_id, name, method, spec_json, \
+             order_index, updated_at, source_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+             ON CONFLICT(id) DO UPDATE SET collection_id=excluded.collection_id, folder_id=excluded.folder_id, \
+             name=excluded.name, method=excluded.method, spec_json=excluded.spec_json, \
+             order_index=excluded.order_index, updated_at=excluded.updated_at, source_key=excluded.source_key",
+            params![row.id, row.collection_id, row.folder_id, row.name, row.method, row.spec_json,
+                row.order_index, row.updated_at, row.source_key],
+        ).map_err(map_error)?;
+        Ok(())
+    }
+
+    pub fn delete_collection(&self, id: &str) -> Result<(), String> {
+        let mut connection = self.connection();
+        let transaction = connection.transaction().map_err(map_error)?;
+        transaction
+            .execute(
+                "DELETE FROM http_collection_requests WHERE collection_id = ?1",
+                params![id],
+            )
+            .map_err(map_error)?;
+        transaction
+            .execute(
+                "DELETE FROM http_collection_folders WHERE collection_id = ?1",
+                params![id],
+            )
+            .map_err(map_error)?;
+        transaction
+            .execute("DELETE FROM http_collections WHERE id = ?1", params![id])
+            .map_err(map_error)?;
+        transaction.commit().map_err(map_error)
+    }
+
+    pub fn delete_collection_request(&self, id: &str) -> Result<(), String> {
+        self.connection()
+            .execute(
+                "DELETE FROM http_collection_requests WHERE id = ?1",
+                params![id],
+            )
+            .map_err(map_error)?;
+        Ok(())
+    }
+
+    pub fn delete_collection_folder(&self, id: &str) -> Result<(), String> {
+        let mut connection = self.connection();
+        let transaction = connection.transaction().map_err(map_error)?;
+        transaction
+            .execute(
+                "DELETE FROM http_collection_requests WHERE folder_id = ?1",
+                params![id],
+            )
+            .map_err(map_error)?;
+        transaction
+            .execute(
+                "DELETE FROM http_collection_folders WHERE id = ?1",
+                params![id],
+            )
+            .map_err(map_error)?;
+        transaction.commit().map_err(map_error)
+    }
+
     fn connection(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.connection.lock().expect("HTTP store mutex poisoned")
     }
@@ -414,6 +646,21 @@ fn has_table(connection: &Connection, table: &str) -> Result<bool, String> {
             |row| row.get::<_, bool>(0),
         )
         .map_err(map_error)
+}
+
+fn ensure_columns(
+    connection: &Connection,
+    table: &str,
+    columns: &[(&str, &str)],
+) -> Result<(), String> {
+    for (column, definition) in columns {
+        if !has_column(connection, table, column)? {
+            connection
+                .execute(&format!("ALTER TABLE {table} ADD COLUMN {definition}"), [])
+                .map_err(map_error)?;
+        }
+    }
+    Ok(())
 }
 
 fn map_error(error: rusqlite::Error) -> String {

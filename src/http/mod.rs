@@ -5,8 +5,8 @@ mod storage;
 
 pub use cancel::HttpCancelState;
 pub use models::{
-    HttpEnvRow, HttpEnvVarRow, HttpHistoryRow, HttpRequestSpec, HttpResponseInfo, HttpSendParams,
-    HttpTabRow,
+    HttpCollectionFolderRow, HttpCollectionRequestRow, HttpCollectionRow, HttpEnvRow,
+    HttpEnvVarRow, HttpHistoryRow, HttpRequestSpec, HttpResponseInfo, HttpSendParams, HttpTabRow,
 };
 pub use send::send;
 pub use storage::HttpStore;

@@ -342,6 +342,36 @@ async fn dispatch_request(
             Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
         },
         "data.envs.vars.delete" => mutate_id(&params, |id| service.store().delete_env_var(id)),
+        "data.collections.list" => serialize_read(service.store().list_collections()),
+        "data.collections.folders.list" => {
+            serialize_read(service.store().list_collection_folders())
+        }
+        "data.collections.requests.list" => {
+            serialize_read(service.store().list_collection_requests())
+        }
+        "data.collections.upsert" => match required_row::<http::HttpCollectionRow>(&params) {
+            Ok(row) => mutate_data(service.store().upsert_collection(row)),
+            Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+        },
+        "data.collections.folders.upsert" => {
+            match required_row::<http::HttpCollectionFolderRow>(&params) {
+                Ok(row) => mutate_data(service.store().upsert_collection_folder(row)),
+                Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+            }
+        }
+        "data.collections.requests.upsert" => {
+            match required_row::<http::HttpCollectionRequestRow>(&params) {
+                Ok(row) => mutate_data(service.store().upsert_collection_request(row)),
+                Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+            }
+        }
+        "data.collections.delete" => mutate_id(&params, |id| service.store().delete_collection(id)),
+        "data.collections.folders.delete" => {
+            mutate_id(&params, |id| service.store().delete_collection_folder(id))
+        }
+        "data.collections.requests.delete" => {
+            mutate_id(&params, |id| service.store().delete_collection_request(id))
+        }
         _ => Err(ServiceError::new(
             "HTTP_SERVICE_METHOD_NOT_FOUND",
             format!("unknown service method: {method}"),
@@ -384,6 +414,20 @@ fn mutate_id(
     operation(id)
         .map(|()| serde_json::Value::Null)
         .map_err(|error| ServiceError::new("HTTP_DATA_WRITE_FAILED", error))
+}
+
+fn mutate_data(result: Result<(), String>) -> Result<serde_json::Value, ServiceError> {
+    result
+        .map(|()| serde_json::Value::Null)
+        .map_err(|error| ServiceError::new("HTTP_DATA_WRITE_FAILED", error))
+}
+
+fn serialize_read<T: serde::Serialize>(
+    result: Result<T, String>,
+) -> Result<serde_json::Value, ServiceError> {
+    result
+        .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
+        .map_err(|error| ServiceError::new("HTTP_DATA_READ_FAILED", error))
 }
 
 async fn write_reply(
@@ -430,6 +474,26 @@ mod tests {
         let reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
         assert_eq!(reply["kind"], "handshake");
         reader
+    }
+
+    async fn call(
+        client: &mut BufReader<TcpStream>,
+        request_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let request = serde_json::json!({
+            "kind": "request",
+            "requestId": request_id,
+            "method": method,
+            "params": params
+        });
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        client.get_mut().write_all(&bytes).await.unwrap();
+        let mut line = Vec::new();
+        client.read_until(b'\n', &mut line).await.unwrap();
+        serde_json::from_slice(&line).unwrap()
     }
 
     #[tokio::test]
@@ -1000,6 +1064,83 @@ mod tests {
             reader.read_until(b'\n', &mut line).await.unwrap();
             let reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
             assert_eq!(reply["result"][0]["id"], expected_id, "{reply}");
+        }
+
+        stop.notify_one();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn shares_collection_tree_and_cascades_deletion_through_data_api() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_directory = directory.path().display().to_string();
+        let server = ServiceServer::bind(
+            directory.path().join("service.endpoint.json"),
+            data_directory.clone(),
+            "0.1.0-alpha.0",
+        )
+        .await
+        .unwrap();
+        let endpoint = server.endpoint().clone();
+        let stop = server.stop_handle();
+        let task = tokio::spawn(server.run());
+        let mut writer =
+            connect_and_handshake(&endpoint, &data_directory, "collection-writer").await;
+
+        for (id, method, row) in [
+            (
+                "collection-upsert",
+                "data.collections.upsert",
+                serde_json::json!({ "id": "collection-1", "name": "Users API",
+                    "orderIndex": 0, "updatedAt": 100, "sourceUrl": "https://example.com/openapi.json",
+                    "sourceHeadersJson": "[]", "syncIntervalSecs": 1800,
+                    "lastSyncedAt": 99, "lastSyncError": null, "baseUrl": "https://api.example.com" }),
+            ),
+            (
+                "folder-upsert",
+                "data.collections.folders.upsert",
+                serde_json::json!({ "id": "folder-1", "collectionId": "collection-1",
+                    "parentId": null, "name": "users", "orderIndex": 0, "updatedAt": 101 }),
+            ),
+            (
+                "request-upsert",
+                "data.collections.requests.upsert",
+                serde_json::json!({ "id": "request-1", "collectionId": "collection-1",
+                    "folderId": "folder-1", "name": "List users", "method": "GET",
+                    "specJson": "{}", "orderIndex": 0, "updatedAt": 102,
+                    "sourceKey": "GET /users" }),
+            ),
+        ] {
+            let reply = call(&mut writer, id, method, serde_json::json!({ "row": row })).await;
+            assert_eq!(reply["kind"], "response", "{reply}");
+        }
+
+        let mut reader =
+            connect_and_handshake(&endpoint, &data_directory, "collection-reader").await;
+        for (method, expected_id) in [
+            ("data.collections.list", "collection-1"),
+            ("data.collections.folders.list", "folder-1"),
+            ("data.collections.requests.list", "request-1"),
+        ] {
+            let reply = call(&mut reader, method, method, serde_json::json!({})).await;
+            assert_eq!(reply["result"][0]["id"], expected_id, "{reply}");
+        }
+
+        let deleted = call(
+            &mut writer,
+            "collection-delete",
+            "data.collections.delete",
+            serde_json::json!({ "id": "collection-1" }),
+        )
+        .await;
+        assert_eq!(deleted["kind"], "response", "{deleted}");
+        for method in [
+            "data.collections.list",
+            "data.collections.folders.list",
+            "data.collections.requests.list",
+        ] {
+            let reply = call(&mut reader, method, method, serde_json::json!({})).await;
+            assert_eq!(reply["result"], serde_json::json!([]), "{reply}");
         }
 
         stop.notify_one();
