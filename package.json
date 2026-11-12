@@ -1,0 +1,15 @@
+{
+  "name": "athttp",
+  "private": true,
+  "version": "0.1.0-alpha.0",
+  "type": "module",
+  "packageManager": "pnpm@10.29.3",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vite": "8.0.10",
+    "vitest": "4.1.5"
+  }
+}
