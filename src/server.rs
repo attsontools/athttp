@@ -277,6 +277,39 @@ async fn dispatch_request(
                 .map_err(|error| ServiceError::new("HTTP_DATA_WRITE_FAILED", error)),
             Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
         },
+        "data.history.list" => {
+            let limit = params
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(500)
+                .min(u32::MAX as u64) as u32;
+            service
+                .store()
+                .list_history(limit)
+                .and_then(|rows| serde_json::to_value(rows).map_err(|error| error.to_string()))
+                .map_err(|error| ServiceError::new("HTTP_DATA_READ_FAILED", error))
+        }
+        "data.history.insert" => match required_row::<http::HttpHistoryRow>(&params) {
+            Ok(row) => service
+                .store()
+                .insert_history(row)
+                .map(|()| serde_json::Value::Null)
+                .map_err(|error| ServiceError::new("HTTP_DATA_WRITE_FAILED", error)),
+            Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+        },
+        "data.history.delete" => match required_string(&params, "id") {
+            Ok(id) => service
+                .store()
+                .delete_history(id)
+                .map(|()| serde_json::Value::Null)
+                .map_err(|error| ServiceError::new("HTTP_DATA_WRITE_FAILED", error)),
+            Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+        },
+        "data.history.clear" => service
+            .store()
+            .clear_history()
+            .map(|()| serde_json::Value::Null)
+            .map_err(|error| ServiceError::new("HTTP_DATA_WRITE_FAILED", error)),
         _ => Err(ServiceError::new(
             "HTTP_SERVICE_METHOD_NOT_FOUND",
             format!("unknown service method: {method}"),
@@ -300,6 +333,14 @@ fn required_string<'a>(params: &'a serde_json::Value, key: &str) -> Result<&'a s
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| format!("{key} is required"))
+}
+
+fn required_row<T: serde::de::DeserializeOwned>(params: &serde_json::Value) -> Result<T, String> {
+    let value = params
+        .get("row")
+        .cloned()
+        .ok_or_else(|| "row is required".to_string())?;
+    serde_json::from_value(value).map_err(|error| format!("invalid row: {error}"))
 }
 
 async fn write_reply(
@@ -772,6 +813,87 @@ mod tests {
             .path()
             .join("http.sqlite3.pre-service-v1.bak")
             .exists());
+
+        stop.notify_one();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn shares_and_clears_history_through_data_api() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_directory = directory.path().display().to_string();
+        let server = ServiceServer::bind(
+            directory.path().join("service.endpoint.json"),
+            data_directory.clone(),
+            "0.1.0-alpha.0",
+        )
+        .await
+        .unwrap();
+        let endpoint = server.endpoint().clone();
+        let stop = server.stop_handle();
+        let task = tokio::spawn(server.run());
+        let mut client = connect_and_handshake(&endpoint, &data_directory, "history-client").await;
+
+        let insert = serde_json::json!({
+            "kind": "request",
+            "requestId": "history-insert",
+            "method": "data.history.insert",
+            "params": { "row": {
+                "id": "history-1",
+                "method": "POST",
+                "url": "https://example.com/users",
+                "status": 201,
+                "elapsedMs": 42,
+                "bodyBytes": 12,
+                "specJson": "{}",
+                "respSummary": "created",
+                "createdAt": 1_797_000_000_000_i64
+            }}
+        });
+        let mut bytes = serde_json::to_vec(&insert).unwrap();
+        bytes.push(b'\n');
+        client.get_mut().write_all(&bytes).await.unwrap();
+        let mut line = Vec::new();
+        client.read_until(b'\n', &mut line).await.unwrap();
+        let insert_reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(insert_reply["kind"], "response", "{insert_reply}");
+
+        let mut other = connect_and_handshake(&endpoint, &data_directory, "history-reader").await;
+        let list = serde_json::json!({
+            "kind": "request",
+            "requestId": "history-list",
+            "method": "data.history.list",
+            "params": { "limit": 10 }
+        });
+        bytes = serde_json::to_vec(&list).unwrap();
+        bytes.push(b'\n');
+        other.get_mut().write_all(&bytes).await.unwrap();
+        line.clear();
+        other.read_until(b'\n', &mut line).await.unwrap();
+        let list_reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(list_reply["result"][0]["id"], "history-1", "{list_reply}");
+
+        let clear = serde_json::json!({
+            "kind": "request",
+            "requestId": "history-clear",
+            "method": "data.history.clear",
+            "params": {}
+        });
+        bytes = serde_json::to_vec(&clear).unwrap();
+        bytes.push(b'\n');
+        other.get_mut().write_all(&bytes).await.unwrap();
+        line.clear();
+        other.read_until(b'\n', &mut line).await.unwrap();
+        let clear_reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(clear_reply["kind"], "response", "{clear_reply}");
+
+        bytes = serde_json::to_vec(&list).unwrap();
+        bytes.push(b'\n');
+        other.get_mut().write_all(&bytes).await.unwrap();
+        line.clear();
+        other.read_until(b'\n', &mut line).await.unwrap();
+        let empty_reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(empty_reply["result"], serde_json::json!([]));
 
         stop.notify_one();
         task.await.unwrap().unwrap();

@@ -107,3 +107,17 @@ pub struct HttpTabRow {
 fn default_kind() -> String {
     "http".to_string()
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpHistoryRow {
+    pub id: String,
+    pub method: String,
+    pub url: String,
+    pub status: Option<i64>,
+    pub elapsed_ms: Option<i64>,
+    pub body_bytes: Option<i64>,
+    pub spec_json: String,
+    pub resp_summary: Option<String>,
+    pub created_at: i64,
+}
