@@ -111,7 +111,9 @@ async fn handle_connection(
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut frame = Vec::new();
-    let read = read_frame(&mut reader, &mut frame, "handshake timed out").await?;
+    let read = timeout(Duration::from_secs(10), read_frame(&mut reader, &mut frame))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))??;
     if read == 0 || frame.len() > MAX_FRAME_BYTES || frame.last() != Some(&b'\n') {
         return Ok(());
     }
@@ -140,9 +142,24 @@ async fn handle_connection(
         return Ok(());
     }
 
+    let mut events = service.stream_state().subscribe();
     loop {
         frame.clear();
-        let read = read_frame(&mut reader, &mut frame, "request timed out").await?;
+        let read = tokio::select! {
+            read = read_frame(&mut reader, &mut frame) => read?,
+            event = events.recv() => {
+                match event {
+                    Ok(event) => write_reply(&mut write_half, ServiceReply::Event {
+                        session_id: event.session_id,
+                        generation: event.generation,
+                        message: event.message,
+                    }).await?,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+                }
+                continue;
+            }
+        };
         if read == 0 {
             return Ok(());
         }
@@ -176,12 +193,9 @@ async fn handle_connection(
 async fn read_frame(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     frame: &mut Vec<u8>,
-    timeout_message: &'static str,
 ) -> io::Result<usize> {
     let mut limited = reader.take((MAX_FRAME_BYTES + 1) as u64);
-    timeout(Duration::from_secs(10), limited.read_until(b'\n', frame))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, timeout_message))?
+    limited.read_until(b'\n', frame).await
 }
 
 async fn dispatch_request(
@@ -386,6 +400,47 @@ async fn dispatch_request(
                 )),
             }
         }
+        "stream.open" => {
+            let session_id = required_string(&params, "sessionId");
+            let kind = required_string(&params, "kind");
+            match (session_id, kind) {
+                (Ok(session_id), Ok("sse")) => {
+                    let spec = params
+                        .get("spec")
+                        .cloned()
+                        .ok_or_else(|| "spec is required".to_string())
+                        .and_then(|value| {
+                            serde_json::from_value::<http::SseSpec>(value)
+                                .map_err(|error| error.to_string())
+                        });
+                    match spec {
+                        Ok(spec) => Ok(serde_json::json!({
+                            "generation": http::stream::open_sse(Arc::clone(service.stream_state()), session_id.into(), spec)
+                        })),
+                        Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+                    }
+                }
+                (Ok(_), Ok(kind)) => Err(ServiceError::new(
+                    "HTTP_SERVICE_REQUEST_INVALID",
+                    format!("unsupported stream kind: {kind}"),
+                )),
+                (Err(error), _) | (_, Err(error)) => {
+                    Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error))
+                }
+            }
+        }
+        "stream.close" => match required_string(&params, "sessionId") {
+            Ok(session_id) => {
+                Ok(serde_json::json!({ "closed": service.stream_state().close(session_id) }))
+            }
+            Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+        },
+        "stream.snapshot" => match required_string(&params, "sessionId") {
+            Ok(session_id) => serialize_read::<Vec<http::StreamMessage>>(Ok(service
+                .stream_state()
+                .snapshot(session_id))),
+            Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+        },
         _ => Err(ServiceError::new(
             "HTTP_SERVICE_METHOD_NOT_FOUND",
             format!("unknown service method: {method}"),
@@ -508,6 +563,31 @@ mod tests {
         let mut line = Vec::new();
         client.read_until(b'\n', &mut line).await.unwrap();
         serde_json::from_slice(&line).unwrap()
+    }
+
+    async fn call_response(
+        client: &mut BufReader<TcpStream>,
+        request_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let request = serde_json::json!({
+            "kind": "request", "requestId": request_id, "method": method, "params": params
+        });
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        client.get_mut().write_all(&bytes).await.unwrap();
+        loop {
+            let mut line = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), client.read_until(b'\n', &mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            let envelope: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            if envelope["requestId"] == request_id {
+                return envelope;
+            }
+        }
     }
 
     #[tokio::test]
@@ -1245,5 +1325,117 @@ mod tests {
 
         stop.notify_one();
         task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn emits_sse_events_after_stream_open() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut request = Vec::new();
+            BufReader::new(&mut stream)
+                .read_until(b'\n', &mut request)
+                .await
+                .unwrap();
+            let body = "event: answer\nid: 7\ndata: hello\n\n";
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let data_directory = directory.path().display().to_string();
+        let server = ServiceServer::bind(
+            directory.path().join("service.endpoint.json"),
+            data_directory.clone(),
+            "0.1.0-alpha.0",
+        )
+        .await
+        .unwrap();
+        let endpoint = server.endpoint().clone();
+        let stop = server.stop_handle();
+        let task = tokio::spawn(server.run());
+        let mut client = connect_and_handshake(&endpoint, &data_directory, "sse-client").await;
+        let request = serde_json::json!({
+            "kind": "request",
+            "requestId": "stream-open-1",
+            "method": "stream.open",
+            "params": {
+                "sessionId": "sse-1",
+                "kind": "sse",
+                "spec": { "url": format!("http://{upstream_address}/events") }
+            }
+        });
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        client.get_mut().write_all(&bytes).await.unwrap();
+
+        let mut saw_response = false;
+        let mut saw_event = false;
+        for _ in 0..5 {
+            let mut line = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), client.read_until(b'\n', &mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            let envelope: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            if envelope["kind"] == "response" && envelope["requestId"] == "stream-open-1" {
+                saw_response = true;
+            }
+            if envelope["kind"] == "event"
+                && envelope["sessionId"] == "sse-1"
+                && envelope["message"]["kind"] == "sseEvent"
+            {
+                assert_eq!(envelope["message"]["event"], "answer");
+                assert_eq!(envelope["message"]["id"], "7");
+                assert_eq!(envelope["message"]["data"], "hello");
+                saw_event = true;
+            }
+            if saw_response && saw_event {
+                break;
+            }
+        }
+        assert!(saw_response, "stream.open response was not received");
+        assert!(saw_event, "SSE event envelope was not received");
+
+        let snapshot = call_response(
+            &mut client,
+            "stream-snapshot-1",
+            "stream.snapshot",
+            serde_json::json!({ "sessionId": "sse-1" }),
+        )
+        .await;
+        assert!(snapshot["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["kind"] == "sseEvent" && message["data"] == "hello"));
+        let closed = call_response(
+            &mut client,
+            "stream-close-1",
+            "stream.close",
+            serde_json::json!({ "sessionId": "sse-1" }),
+        )
+        .await;
+        assert_eq!(closed["kind"], "response");
+        let empty = call_response(
+            &mut client,
+            "stream-snapshot-2",
+            "stream.snapshot",
+            serde_json::json!({ "sessionId": "sse-1" }),
+        )
+        .await;
+        assert_eq!(empty["result"], serde_json::json!([]));
+
+        stop.notify_one();
+        task.await.unwrap().unwrap();
+        upstream_task.await.unwrap();
     }
 }

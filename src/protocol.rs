@@ -2,6 +2,8 @@ use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::http::StreamMessage;
+
 pub const APP_ID: &str = "com.attson.http";
 pub const HOST_API: &str = "2.0.0";
 pub const DATA_API: &str = "1.0.0";
@@ -118,6 +120,13 @@ pub enum ServiceReply {
         #[serde(rename = "requestId")]
         request_id: String,
         result: Value,
+    },
+    #[serde(rename = "event")]
+    Event {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        generation: u64,
+        message: StreamMessage,
     },
 }
 

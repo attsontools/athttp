@@ -190,3 +190,71 @@ pub struct HttpCollectionRequestRow {
     #[serde(default)]
     pub source_key: Option<String>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SseSpec {
+    pub url: String,
+    #[serde(default)]
+    pub headers: Vec<KeyValue>,
+    #[serde(default)]
+    pub query_params: Vec<KeyValue>,
+    #[serde(default)]
+    pub auth: HttpAuth,
+    #[serde(default)]
+    pub timeout_seconds: Option<u32>,
+    #[serde(default = "default_true")]
+    pub verify_ssl: bool,
+    #[serde(default)]
+    pub last_event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum StreamMessage {
+    Open {
+        at_ms: u64,
+        status: Option<u16>,
+        headers: Vec<(String, String)>,
+    },
+    SseEvent {
+        at_ms: u64,
+        event: String,
+        data: String,
+        id: Option<String>,
+        retry_ms: Option<u64>,
+        truncated: bool,
+    },
+    Closed {
+        at_ms: u64,
+        code: Option<u16>,
+        reason: String,
+    },
+    Error {
+        at_ms: u64,
+        message: String,
+    },
+    BufferTruncated {
+        at_ms: u64,
+        dropped: usize,
+    },
+}
+
+impl StreamMessage {
+    pub fn approx_size(&self) -> usize {
+        match self {
+            Self::Open { headers, .. } => {
+                64 + headers
+                    .iter()
+                    .map(|(k, v)| k.len() + v.len())
+                    .sum::<usize>()
+            }
+            Self::SseEvent {
+                event, data, id, ..
+            } => 32 + event.len() + data.len() + id.as_deref().map(str::len).unwrap_or(0),
+            Self::Closed { reason, .. } => 24 + reason.len(),
+            Self::Error { message, .. } => 24 + message.len(),
+            Self::BufferTruncated { .. } => 32,
+        }
+    }
+}
