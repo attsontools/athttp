@@ -1,5 +1,6 @@
 mod endpoint;
 mod protocol;
+pub mod server;
 
 #[cfg(test)]
 mod endpoint_test;
@@ -9,5 +10,5 @@ mod protocol_test;
 pub use endpoint::{read_endpoint, write_endpoint, Endpoint};
 pub use protocol::{
     negotiate, ErrorEnvelope, HandshakeRequest, ServiceCapabilities, ServiceError,
-    ServiceHandshake, ServiceHandshakeResponse,
+    ServiceHandshake, ServiceHandshakeResponse, ServiceReply,
 };
