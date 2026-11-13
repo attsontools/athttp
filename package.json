@@ -1,0 +1,34 @@
+{
+  "name": "athttp",
+  "private": true,
+  "version": "0.1.0-alpha.0",
+  "type": "module",
+  "packageManager": "pnpm@10.29.3",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1426",
+    "build": "tsc --noEmit && vite build",
+    "build:plugin": "tsc --noEmit && vite build --mode plugin --outDir dist-plugin",
+    "package:plugin": "pnpm build:plugin && node scripts/package-plugin.mjs",
+    "test": "vitest run",
+    "stage:service": "node scripts/stage-service.mjs",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@attson/plugin-sdk": "github:attsontools/attool-plugin-sdk#v0.1.0-alpha.2",
+    "@tauri-apps/api": "2.12.3",
+    "@tauri-apps/plugin-clipboard-manager": "2.3.2",
+    "@tauri-apps/plugin-dialog": "2.7.0",
+    "monaco-editor": "0.55.1",
+    "naive-ui": "2.44.1",
+    "vue": "3.5.33"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.2",
+    "@vitejs/plugin-vue": "6.0.6",
+    "typescript": "6.0.3",
+    "vite": "8.0.10",
+    "vitest": "4.1.5"
+  }
+}

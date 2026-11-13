@@ -1,0 +1,119 @@
+:root {
+  /* Surface */
+  --bg-base: #0a0a0b;
+  --bg-elevated: #131316;
+  --bg-elev-2: #18181c;
+  --bg-overlay: #1d1d22;
+
+  /* Line */
+  --line: #1f1f23;
+  --line-strong: #28282d;
+
+  /* Text */
+  --text: #ededed;
+  --text-muted: #8b8b8b;
+  --text-faint: #6a6a6f;
+
+  /* Accent */
+  --accent: #34d399;
+  --accent-hover: #4ade80;
+  --accent-pressed: #16a34a;
+  --accent-fg: #0a0a0b;
+  --accent-soft: rgba(52, 211, 153, 0.14);
+  --accent-line: rgba(52, 211, 153, 0.35);
+
+  /* Semantic */
+  --warning: #f5b94b;
+  --error: #f87171;
+  --info: #60a5fa;
+  --success: var(--accent);
+
+  /* Extended semantic colors (SSE / WS) */
+  --purple: #c084fc;
+  --cyan:   #22d3ee;
+
+  /* Soft backgrounds (chip / pill 底色统一：rgba(same-rgb, 0.14)) */
+  --warning-soft: rgba(245, 185, 75, 0.14);
+  --info-soft:    rgba(96, 165, 250, 0.14);
+  --error-soft:   rgba(248, 113, 113, 0.14);
+  --purple-soft:  rgba(192, 132, 252, 0.14);
+  --cyan-soft:    rgba(34, 211, 238, 0.14);
+
+  /* Canvas (template editor checker pattern) */
+  --canvas-bg: var(--bg-base);
+  --canvas-checker: var(--bg-elev-2);
+
+  /* Radius */
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  /* Font */
+  --font-sans: -apple-system, "SF Pro Text", "PingFang SC", "Inter", "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* Font size */
+  --fs-xxs: 11px;
+  --fs-xs: 12px;
+  --fs-sm: 12.5px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 17px;
+  --fs-2xl: 22px;
+
+  /* Motion */
+  --motion-fast: 120ms ease;
+  --motion-mid: 180ms ease;
+
+  /* Shadow */
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-canvas: 0 12px 32px rgba(0, 0, 0, 0.5);
+
+  /* Layout */
+  --topbar-height: 52px;
+  --sidebar-width: 220px;
+  --sidebar-width-collapsed: 56px;
+}
+
+[data-theme="light"] {
+  --bg-base: #fafaf9;
+  --bg-elevated: #ffffff;
+  --bg-elev-2: #f4f4f5;
+  --bg-overlay: #ffffff;
+
+  --line: #e4e4e7;
+  --line-strong: #d4d4d8;
+
+  --text: #18181b;
+  --text-muted: #71717a;
+  --text-faint: #a1a1aa;
+
+  --accent: #10b981;
+  --accent-hover: #059669;
+  --accent-pressed: #047857;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(16, 185, 129, 0.12);
+
+  --warning: #d97706;
+  --error: #dc2626;
+  --info: #2563eb;
+
+  --canvas-bg: #f4f4f5;
+  --canvas-checker: #e5e7eb;
+
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.10);
+  --shadow-canvas: 0 12px 32px rgba(0, 0, 0, 0.10);
+
+  --purple: #7c3aed;
+  --cyan:   #0891b2;
+
+  --warning-soft: rgba(217, 119, 6, 0.10);
+  --info-soft:    rgba(37, 99, 235, 0.10);
+  --error-soft:   rgba(220, 38, 38, 0.10);
+  --purple-soft:  rgba(124, 58, 237, 0.10);
+  --cyan-soft:    rgba(8, 145, 178, 0.10);
+
+  --accent-line:  rgba(16, 185, 129, 0.28);
+}

@@ -11,7 +11,7 @@ AT HTTP（Tauri 2 + Vue 3 + Native/Data Service）。独立应用和 AT Tool 插
 - Service API：`1.x`
 - Data API：`1.x`
 
-## P0 约束
+## 服务约束
 
 - Native/Data Service 是 `http.sqlite3` 的唯一数据所有者；客户端不得直接并发打开数据库。
 - service 只绑定临时 loopback TCP 端口，通过权限受限 endpoint 文件发现端口和 UUID token；不得监听固定端口、局域网地址或公网地址。

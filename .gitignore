@@ -1,3 +1,11 @@
 /target/
+/src-tauri/target/
+/src-tauri/binaries/athttp-service-*
+/src-tauri/gen/
+/node_modules/
+/dist/
+/dist-plugin/
+/artifacts/
+/coverage/
 .DS_Store
 

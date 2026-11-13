@@ -1,5 +1,8 @@
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::http::StreamMessage;
 
 pub const APP_ID: &str = "com.attson.http";
 pub const HOST_API: &str = "2.0.0";
@@ -108,8 +111,35 @@ pub enum ServiceReply {
     Handshake(ServiceHandshakeResponse),
     #[serde(rename = "error")]
     Error {
+        #[serde(rename = "requestId")]
         request_id: String,
         error: ErrorEnvelope,
+    },
+    #[serde(rename = "response")]
+    Response {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        result: Value,
+    },
+    #[serde(rename = "event")]
+    Event {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        generation: u64,
+        message: StreamMessage,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ServiceRequest {
+    #[serde(rename = "request")]
+    Request {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        method: String,
+        #[serde(default)]
+        params: Value,
     },
 }
 
