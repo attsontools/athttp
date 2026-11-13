@@ -10,7 +10,7 @@ pub struct SseFrame {
 
 #[derive(Default)]
 pub struct SseParser {
-    buffer: String,
+    buffer: Vec<u8>,
     event: Option<String>,
     data: String,
     id: Option<String>,
@@ -21,15 +21,15 @@ pub struct SseParser {
 
 impl SseParser {
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<SseFrame> {
-        self.buffer.push_str(&String::from_utf8_lossy(bytes));
+        self.buffer.extend_from_slice(bytes);
         let mut frames = Vec::new();
-        while let Some(newline) = self.buffer.find('\n') {
-            let end = if newline > 0 && self.buffer.as_bytes()[newline - 1] == b'\r' {
+        while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            let end = if newline > 0 && self.buffer[newline - 1] == b'\r' {
                 newline - 1
             } else {
                 newline
             };
-            let line = self.buffer[..end].to_string();
+            let line = String::from_utf8_lossy(&self.buffer[..end]).into_owned();
             self.buffer.drain(..=newline);
             if line.is_empty() {
                 if self.dirty {
@@ -105,6 +105,18 @@ mod tests {
         assert_eq!(frames[0].event, "answer");
         assert_eq!(frames[0].id.as_deref(), Some("7"));
         assert_eq!(frames[0].data, "hello\nworld");
+    }
+
+    #[test]
+    fn preserves_a_multibyte_character_split_across_chunks() {
+        let payload = "data: 中\n\n".as_bytes();
+        let mut parser = SseParser::default();
+
+        assert!(parser.feed(&payload[..7]).is_empty());
+        let frames = parser.feed(&payload[7..]);
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, "中");
     }
 
     #[test]
