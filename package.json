@@ -16,6 +16,7 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
+    "@attson/plugin-sdk": "github:attsontools/attool-plugin-sdk#v0.1.0-alpha.1",
     "@tauri-apps/api": "2.12.3",
     "@tauri-apps/plugin-clipboard-manager": "2.3.2",
     "@tauri-apps/plugin-dialog": "2.7.0",
