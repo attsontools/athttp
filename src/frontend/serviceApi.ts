@@ -395,14 +395,30 @@ export interface StreamApi {
 
 export function createStreamApi(transport: ServiceTransport): StreamApi {
   const generations = new Map<string, number>();
+  const opening = new Set<string>();
+  const pendingEvents = new Map<string, Array<{
+    generation: number;
+    deliver: () => void;
+  }>>();
   return {
     async openStream(sessionId, kind, spec) {
-      const result = await transport.request<{ generation: number }>('stream.open', {
-        sessionId,
-        kind,
-        spec
-      });
-      generations.set(sessionId, result.generation);
+      generations.delete(sessionId);
+      opening.add(sessionId);
+      pendingEvents.set(sessionId, []);
+      try {
+        const result = await transport.request<{ generation: number }>('stream.open', {
+          sessionId,
+          kind,
+          spec
+        });
+        generations.set(sessionId, result.generation);
+        for (const event of pendingEvents.get(sessionId) ?? []) {
+          if (event.generation === result.generation) event.deliver();
+        }
+      } finally {
+        opening.delete(sessionId);
+        pendingEvents.delete(sessionId);
+      }
     },
     async closeStream(sessionId) {
       await transport.request('stream.close', { sessionId });
@@ -414,11 +430,26 @@ export function createStreamApi(transport: ServiceTransport): StreamApi {
       return await transport.request<StreamMessage[]>('stream.snapshot', { sessionId });
     },
     async listen(sessionId, onMessage) {
-      return transport.subscribe((event) => {
+      let active = true;
+      const unlisten = transport.subscribe((event) => {
         if (event.sessionId !== sessionId) return;
-        if (event.generation !== generations.get(sessionId)) return;
-        onMessage(event.message);
+        if (event.generation === generations.get(sessionId)) {
+          onMessage(event.message);
+          return;
+        }
+        if (opening.has(sessionId)) {
+          pendingEvents.get(sessionId)?.push({
+            generation: event.generation,
+            deliver: () => {
+              if (active) onMessage(event.message);
+            }
+          });
+        }
       });
+      return () => {
+        active = false;
+        unlisten();
+      };
     }
   };
 }

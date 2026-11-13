@@ -476,13 +476,16 @@ async fn dispatch_request(
         },
         "data.envs.delete" => mutate_id(&params, |id| service.store().delete_env(id)),
         "data.envs.setActive" => mutate_id(&params, |id| service.store().set_active_env(id)),
-        "data.envs.vars.list" => match required_string(&params, "envId") {
-            Ok(env_id) => service
+        "data.envs.vars.list" => match params.get("envId").and_then(serde_json::Value::as_str) {
+            Some(env_id) => service
                 .store()
                 .list_env_vars(env_id)
                 .and_then(|rows| serde_json::to_value(rows).map_err(|error| error.to_string()))
                 .map_err(|error| ServiceError::new("HTTP_DATA_READ_FAILED", error)),
-            Err(error) => Err(ServiceError::new("HTTP_SERVICE_REQUEST_INVALID", error)),
+            None => Err(ServiceError::new(
+                "HTTP_SERVICE_REQUEST_INVALID",
+                "envId is required",
+            )),
         },
         "data.envs.vars.upsert" => match required_row::<http::HttpEnvVarRow>(&params) {
             Ok(row) => service
@@ -1386,6 +1389,13 @@ mod tests {
                     "value": "https://api.example.com", "enabled": true, "orderIndex": 0,
                     "updatedAt": 101 } }
             }),
+            serde_json::json!({
+                "kind": "request", "requestId": "global-var-upsert",
+                "method": "data.envs.vars.upsert",
+                "params": { "row": { "id": "global-var-1", "envId": "", "key": "token",
+                    "value": "global-token", "enabled": true, "orderIndex": 0,
+                    "updatedAt": 102 } }
+            }),
         ] {
             let mut bytes = serde_json::to_vec(&request).unwrap();
             bytes.push(b'\n');
@@ -1404,6 +1414,11 @@ mod tests {
                 serde_json::json!({ "envId": "env-1" }),
                 "var-1",
             ),
+            (
+                "data.envs.vars.list",
+                serde_json::json!({ "envId": "" }),
+                "global-var-1",
+            ),
         ] {
             let request = serde_json::json!({
                 "kind": "request", "requestId": format!("{method}-list"), "method": method,
@@ -1417,6 +1432,15 @@ mod tests {
             let reply: serde_json::Value = serde_json::from_slice(&line).unwrap();
             assert_eq!(reply["result"][0]["id"], expected_id, "{reply}");
         }
+
+        let invalid = call(
+            &mut reader,
+            "empty-tab-id",
+            "data.tabs.delete",
+            serde_json::json!({ "id": "" }),
+        )
+        .await;
+        assert_eq!(invalid["error"]["code"], "HTTP_SERVICE_REQUEST_INVALID");
 
         stop.notify_one();
         task.await.unwrap().unwrap();
