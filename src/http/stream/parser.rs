@@ -1,4 +1,5 @@
 const MAX_DATA_BYTES: usize = 1024 * 1024;
+const MAX_LINE_BYTES: usize = 5 * 1024 * 1024;
 
 pub struct SseFrame {
     pub event: String,
@@ -20,17 +21,23 @@ pub struct SseParser {
 }
 
 impl SseParser {
-    pub fn feed(&mut self, bytes: &[u8]) -> Vec<SseFrame> {
-        self.buffer.extend_from_slice(bytes);
+    pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<SseFrame>, String> {
         let mut frames = Vec::new();
-        while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
-            let end = if newline > 0 && self.buffer[newline - 1] == b'\r' {
-                newline - 1
+        let mut remaining = bytes;
+        loop {
+            let Some(newline) = remaining.iter().position(|byte| *byte == b'\n') else {
+                self.extend_line(remaining)?;
+                break;
+            };
+            self.extend_line(&remaining[..newline])?;
+            remaining = &remaining[newline + 1..];
+            let end = if self.buffer.last() == Some(&b'\r') {
+                self.buffer.len() - 1
             } else {
-                newline
+                self.buffer.len()
             };
             let line = String::from_utf8_lossy(&self.buffer[..end]).into_owned();
-            self.buffer.drain(..=newline);
+            self.buffer.clear();
             if line.is_empty() {
                 if self.dirty {
                     frames.push(self.take());
@@ -75,7 +82,20 @@ impl SseParser {
                 _ => {}
             }
         }
-        frames
+        Ok(frames)
+    }
+
+    fn extend_line(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let length = self
+            .buffer
+            .len()
+            .checked_add(bytes.len())
+            .ok_or_else(|| "SSE 单行超过 5 MB 上限".to_string())?;
+        if length > MAX_LINE_BYTES {
+            return Err("SSE 单行超过 5 MB 上限".into());
+        }
+        self.buffer.extend_from_slice(bytes);
+        Ok(())
     }
 
     fn take(&mut self) -> SseFrame {
@@ -99,8 +119,10 @@ mod tests {
     #[test]
     fn parses_chunked_multiline_sse_frames() {
         let mut parser = SseParser::default();
-        assert!(parser.feed(b"event: ans").is_empty());
-        let frames = parser.feed(b"wer\nid: 7\ndata: hello\ndata: world\n\n");
+        assert!(parser.feed(b"event: ans").unwrap().is_empty());
+        let frames = parser
+            .feed(b"wer\nid: 7\ndata: hello\ndata: world\n\n")
+            .unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].event, "answer");
         assert_eq!(frames[0].id.as_deref(), Some("7"));
@@ -112,18 +134,31 @@ mod tests {
         let payload = "data: 中\n\n".as_bytes();
         let mut parser = SseParser::default();
 
-        assert!(parser.feed(&payload[..7]).is_empty());
-        let frames = parser.feed(&payload[7..]);
+        assert!(parser.feed(&payload[..7]).unwrap().is_empty());
+        let frames = parser.feed(&payload[7..]).unwrap();
 
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, "中");
     }
 
     #[test]
+    fn rejects_an_sse_line_larger_than_five_megabytes() {
+        let mut parser = SseParser::default();
+        let oversized = vec![b'x'; 5 * 1024 * 1024 + 1];
+
+        let error = match parser.feed(&oversized) {
+            Err(error) => error,
+            Ok(_) => panic!("oversized line must fail"),
+        };
+
+        assert!(error.contains("5 MB"), "{error}");
+    }
+
+    #[test]
     fn truncates_oversized_multibyte_data_at_a_character_boundary() {
         let payload = format!("data: {}\n\n", "中".repeat(MAX_DATA_BYTES));
         let mut parser = SseParser::default();
-        let frames = parser.feed(payload.as_bytes());
+        let frames = parser.feed(payload.as_bytes()).unwrap();
         assert!(frames[0].truncated);
         assert!(frames[0].data.len() <= MAX_DATA_BYTES);
         assert!(frames[0].data.is_char_boundary(frames[0].data.len()));

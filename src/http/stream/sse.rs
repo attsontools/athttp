@@ -126,7 +126,7 @@ async fn run(
     loop {
         tokio::select! {
             chunk = response.chunk() => match chunk.map_err(|e| e.to_string())? {
-                Some(bytes) => for frame in parser.feed(&bytes) { state.publish(session_id, generation, buffer, StreamMessage::SseEvent { at_ms: now_ms(), event: frame.event, data: frame.data, id: frame.id, retry_ms: frame.retry_ms, truncated: frame.truncated }); },
+                Some(bytes) => for frame in parser.feed(&bytes)? { state.publish(session_id, generation, buffer, StreamMessage::SseEvent { at_ms: now_ms(), event: frame.event, data: frame.data, id: frame.id, retry_ms: frame.retry_ms, truncated: frame.truncated }); },
                 None => { state.publish(session_id, generation, buffer, StreamMessage::Closed { at_ms: now_ms(), code: None, reason: "server closed stream".into() }); return Ok(()); }
             },
             _ = &mut *cancel => { state.publish(session_id, generation, buffer, StreamMessage::Closed { at_ms: now_ms(), code: Some(1000), reason: "client".into() }); return Ok(()); }
