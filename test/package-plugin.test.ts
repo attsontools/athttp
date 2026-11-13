@@ -17,7 +17,7 @@ describe('HTTP plugin package contract', () => {
     );
 
     expect(packageJson.dependencies['@attson/plugin-sdk'])
-      .toBe('github:attsontools/attool-plugin-sdk#v0.1.0-alpha.1');
+      .toBe('github:attsontools/attool-plugin-sdk#v0.1.0-alpha.2');
   });
 
   it('binds Host API 2 permissions and the native service to the same signed version', () => {

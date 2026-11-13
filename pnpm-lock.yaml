@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@attson/plugin-sdk':
-        specifier: github:attsontools/attool-plugin-sdk#v0.1.0-alpha.1
-        version: https://codeload.github.com/attsontools/attool-plugin-sdk/tar.gz/f9350ad3aeb88d815ae7369df1f137cb093f9381
+        specifier: github:attsontools/attool-plugin-sdk#v0.1.0-alpha.2
+        version: https://codeload.github.com/attsontools/attool-plugin-sdk/tar.gz/4478ada9c14ebd8755fc72e75724d55ae47e1621
       '@tauri-apps/api':
         specifier: 2.12.3
         version: 2.12.3
@@ -48,8 +48,10 @@ importers:
 
 packages:
 
-  '@attson/plugin-sdk@https://codeload.github.com/attsontools/attool-plugin-sdk/tar.gz/f9350ad3aeb88d815ae7369df1f137cb093f9381':
-    resolution: {tarball: https://codeload.github.com/attsontools/attool-plugin-sdk/tar.gz/f9350ad3aeb88d815ae7369df1f137cb093f9381}
+  '@attson/plugin-sdk@https://codeload.github.com/attsontools/attool-plugin-sdk/tar.gz/4478ada9c14ebd8755fc72e75724d55ae47e1621':
+    resolution: {tarball: https://codeload.github.com/attsontools/attool-plugin-sdk/tar.gz/4478ada9c14ebd8755fc72e75724d55ae47e1621}
+    version: 0.1.0-alpha.2
+    engines: {node: '>=22.6'}
 
   '@babel/helper-string-parser@7.29.14':
     resolution: {integrity: sha512-CXvKMFvM80ihI7Vox9jb+kQjnyjESQNPM+vB7U0Zz6TWuZA+Z/FL0QPMH300h33qJtIx+REeBhXqWOPW48TcAQ==}
@@ -738,7 +740,7 @@ packages:
 
 snapshots:
 
-  '@attson/plugin-sdk@https://codeload.github.com/attsontools/attool-plugin-sdk/tar.gz/f9350ad3aeb88d815ae7369df1f137cb093f9381': {}
+  '@attson/plugin-sdk@https://codeload.github.com/attsontools/attool-plugin-sdk/tar.gz/4478ada9c14ebd8755fc72e75724d55ae47e1621': {}
 
   '@babel/helper-string-parser@7.29.14': {}
 
