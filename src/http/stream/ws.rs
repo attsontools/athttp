@@ -1,19 +1,27 @@
 use std::{
+    fmt,
     str::FromStr,
     sync::{Arc, Mutex},
 };
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
+use rustls::{
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    crypto::{verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms},
+    pki_types::{CertificateDer, ServerName, UnixTime},
+    ClientConfig, DigitallySignedStruct, Error as TlsError, SignatureScheme,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::{
-    connect_async,
+    connect_async_tls_with_config,
     tungstenite::{
         client::IntoClientRequest,
         handshake::client::Request,
         http::{HeaderName, HeaderValue},
         Message,
     },
+    Connector,
 };
 
 use super::{buffer::SessionBuffer, session::HttpStreamState};
@@ -21,6 +29,65 @@ use crate::http::{Direction, StreamMessage, WsSpec};
 
 const MAX_TEXT_BYTES: usize = 1024 * 1024;
 const BINARY_PREVIEW_BYTES: usize = 4 * 1024;
+
+struct AcceptInvalidCertificates {
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl fmt::Debug for AcceptInvalidCertificates {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("AcceptInvalidCertificates").finish()
+    }
+}
+
+impl ServerCertVerifier for AcceptInvalidCertificates {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, TlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls12_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+fn invalid_certificate_connector() -> Result<Connector, String> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = Arc::new(AcceptInvalidCertificates {
+        algorithms: provider.signature_verification_algorithms,
+    });
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|error| format!("TLS config failed: {error}"))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    Ok(Connector::Rustls(Arc::new(config)))
+}
 
 pub async fn run_ws(
     state: Arc<HttpStreamState>,
@@ -125,7 +192,12 @@ async fn run(
                 .map_err(|error| error.to_string())?,
         );
     }
-    let connection = connect_async(request);
+    let connector = if url.scheme() == "wss" && !spec.verify_ssl {
+        Some(invalid_certificate_connector()?)
+    } else {
+        None
+    };
+    let connection = connect_async_tls_with_config(request, None, false, connector);
     tokio::pin!(connection);
     let (socket, response) = tokio::select! {
         result = &mut connection => result.map_err(|error| format!("connect failed: {error}"))?,
@@ -220,6 +292,80 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use rustls::{
+        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+        ServerConfig,
+    };
+    use tokio::{net::TcpListener, task::JoinHandle, time::Duration};
+    use tokio_rustls::TlsAcceptor;
+
+    const TEST_CERT_DER: &str = "MIIBmjCCAT+gAwIBAgIUQXe1oiXane9Xx3/AmuTCDv7wljIwCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MTExMzA2MzA1NVoXDTM2MTExMDA2MzA1NVowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE94ONbd1mLHGdj+Tj7zLLYPKeiNiQx2AT9V7ohNkhtNWvM5jrDCP8BAV/c5K96sX/tYiQr5n9fnPA9O4N6F1yVaNvMG0wHQYDVR0OBBYEFDPyBZ5nr0jaY0om9s8EdMpCb5QjMB8GA1UdIwQYMBaAFDPyBZ5nr0jaY0om9s8EdMpCb5QjMA8GA1UdEwEB/wQFMAMBAf8wGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMAoGCCqGSM49BAMCA0kAMEYCIQC9HyGKAFWLLl4TQuGkWQN3AOOKM8SrwTTIN+tLITow4QIhANpFlC4s6HtkQihRbWaBqiicyavEC6xMXGMd77BC7pOZ";
+    const TEST_KEY_DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgIYk2xGvrFrtmcwKCZCwvQ5FAPfhBq7x3lXirn75brB6hRANCAAT3g41t3WYscZ2P5OPvMstg8p6I2JDHYBP1XuiE2SG01a8zmOsMI/wEBX9zkr3qxf+1iJCvmf1+c8D07g3oXXJV";
+
+    async fn spawn_self_signed_wss() -> (String, JoinHandle<()>) {
+        let cert = CertificateDer::from(
+            base64::engine::general_purpose::STANDARD
+                .decode(TEST_CERT_DER)
+                .unwrap(),
+        );
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            base64::engine::general_purpose::STANDARD
+                .decode(TEST_KEY_DER)
+                .unwrap(),
+        ));
+        let config =
+            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)
+                .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let Ok(tls) = acceptor.accept(tcp).await else {
+                return;
+            };
+            let Ok(mut socket) = tokio_tungstenite::accept_async(tls).await else {
+                return;
+            };
+            let _ = socket.close(None).await;
+        });
+        (format!("wss://{address}"), server)
+    }
+
+    fn ws_spec(url: String, verify_ssl: bool) -> WsSpec {
+        WsSpec {
+            url,
+            headers: vec![],
+            query_params: vec![],
+            auth: Default::default(),
+            verify_ssl,
+            subprotocols: vec![],
+            ping_interval_seconds: None,
+        }
+    }
+
+    async fn wait_for_event(
+        receiver: &mut tokio::sync::broadcast::Receiver<super::super::session::StreamEvent>,
+        session_id: &str,
+        predicate: impl Fn(&StreamMessage) -> bool,
+    ) -> StreamMessage {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let event = receiver.recv().await.unwrap();
+                if event.session_id == session_id && predicate(&event.message) {
+                    return event.message;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for WebSocket event")
+    }
 
     #[test]
     fn truncates_oversized_text_at_a_character_boundary() {
@@ -231,5 +377,40 @@ mod tests {
         assert!(multibyte_truncated);
         assert!(multibyte.len() <= MAX_TEXT_BYTES);
         assert_eq!(multibyte.len() % 3, 0);
+    }
+
+    #[tokio::test]
+    async fn rejects_a_self_signed_wss_certificate_when_verification_is_enabled() {
+        let (url, server) = spawn_self_signed_wss().await;
+        let state = Arc::new(HttpStreamState::default());
+        let mut events = state.subscribe();
+
+        state.open_ws("strict".into(), ws_spec(url, true));
+
+        let error = wait_for_event(&mut events, "strict", |message| {
+            matches!(message, StreamMessage::Error { .. })
+        })
+        .await;
+        let StreamMessage::Error { message, .. } = error else {
+            unreachable!();
+        };
+        assert!(message.to_lowercase().contains("certificate"), "{message}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connects_to_self_signed_wss_when_verification_is_disabled() {
+        let (url, server) = spawn_self_signed_wss().await;
+        let state = Arc::new(HttpStreamState::default());
+        let mut events = state.subscribe();
+
+        state.open_ws("insecure".into(), ws_spec(url, false));
+
+        let opened = wait_for_event(&mut events, "insecure", |message| {
+            matches!(message, StreamMessage::Open { .. })
+        })
+        .await;
+        assert!(matches!(opened, StreamMessage::Open { .. }));
+        server.await.unwrap();
     }
 }
