@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import {
   NButton,
   NDropdown,
@@ -15,7 +15,10 @@ import type { HttpRequestSpec, HttpMethod, KV, MultipartField } from './types';
 import type { VarContext } from './variables';
 import { collectUnknownVars } from './variables';
 import { parseCurl, toCurl } from './curl';
+import { formatJsonBody, validateJsonBody } from './jsonBody';
+import CodeEditor from '../ui/CodeEditor.vue';
 import Kbd from '../ui/Kbd.vue';
+import StableTextField from '../ui/StableTextField.vue';
 
 const props = defineProps<{
   spec: HttpRequestSpec;
@@ -40,6 +43,9 @@ const spec = computed({
 });
 
 const requestTab = ref('params');
+const urlOverlay = ref<HTMLDivElement | null>(null);
+const bodyEditor = ref<{ replaceValue(value: string): void; focus(): void } | null>(null);
+const jsonError = ref('');
 
 const methodOptions: Array<{ label: HttpMethod; value: HttpMethod }> = [
   { label: 'GET', value: 'GET' },
@@ -78,6 +84,16 @@ function highlightVars(input: string): string {
 }
 
 const urlHtml = computed(() => highlightVars(props.spec.url));
+
+function updateUrl(value: string) {
+  spec.value = { ...props.spec, url: value };
+}
+
+function syncUrlScroll(event: Event) {
+  if (urlOverlay.value) {
+    urlOverlay.value.scrollLeft = (event.target as HTMLInputElement).scrollLeft;
+  }
+}
 
 // ---- Params <-> URL 双向同步 ----
 // 用 flush: 'sync' 让守卫在同一批变更内生效，避免 Vue 默认异步 flush 让
@@ -219,6 +235,37 @@ const currentCurl = computed(() => toCurl(props.spec, null));
 const activeHeaderCount = computed(() => props.spec.headers.filter((h) => h.enabled && h.key).length);
 const activeParamCount = computed(() => props.spec.queryParams.filter((p) => p.enabled && p.key).length);
 const urlUnknownVars = computed(() => collectUnknownVars(props.spec.url, props.varContext));
+
+function updateBody(value: string) {
+  jsonError.value = '';
+  spec.value = { ...props.spec, body: value };
+}
+
+function formatJson() {
+  const result = formatJsonBody(props.spec.body);
+  if (!result.ok) {
+    jsonError.value = result.error;
+    bodyEditor.value?.focus();
+    return;
+  }
+  jsonError.value = '';
+  bodyEditor.value?.replaceValue(result.value);
+}
+
+function submit() {
+  if (!bodyDisabled.value && props.spec.bodyType === 'json') {
+    const result = validateJsonBody(props.spec.body);
+    if (!result.ok) {
+      requestTab.value = 'body';
+      jsonError.value = result.error;
+      void nextTick(() => bodyEditor.value?.focus());
+      return;
+    }
+  }
+  emit('send');
+}
+
+defineExpose({ submit });
 </script>
 
 <template>
@@ -232,16 +279,17 @@ const urlUnknownVars = computed(() => collectUnknownVars(props.spec.url, props.v
         @update:value="(v: HttpMethod) => spec = { ...spec, method: v }"
       />
       <div class="url-input-wrap">
-        <input
+        <StableTextField
           class="url-input mono"
-          :value="spec.url"
+          :model-value="spec.url"
           placeholder="https://{{baseUrl}}/path"
-          @input="(e: any) => spec = { ...spec, url: e.target.value }"
-          @keyup.enter="emit('send')"
+          @update:model-value="updateUrl"
+          @scroll="syncUrlScroll"
+          @keyup.enter="submit"
         />
-        <div class="url-overlay mono" v-html="urlHtml" aria-hidden="true"></div>
+        <div ref="urlOverlay" class="url-overlay mono" v-html="urlHtml" aria-hidden="true"></div>
       </div>
-      <n-button v-if="!sending" type="primary" @click="emit('send')">
+      <n-button v-if="!sending" type="primary" @click="submit">
         <span class="send-label">发送<Kbd>⌘↩</Kbd></span>
       </n-button>
       <n-button v-else tertiary @click="emit('cancel')">取消</n-button>
@@ -259,8 +307,8 @@ const urlUnknownVars = computed(() => collectUnknownVars(props.spec.url, props.v
         <div class="kv-table">
           <div v-for="(row, i) in spec.queryParams" :key="i" class="kv-row">
             <input type="checkbox" v-model="row.enabled" />
-            <input class="kv-input mono" v-model="row.key" placeholder="参数名" />
-            <input class="kv-input mono" v-model="row.value" placeholder="值 (支持 {{var}})" />
+            <StableTextField class="kv-input mono" v-model="row.key" placeholder="参数名" />
+            <StableTextField class="kv-input mono" v-model="row.value" placeholder="值 (支持 {{var}})" />
             <button class="kv-del" @click="updateParams(spec.queryParams.filter((_, j) => j !== i))">✕</button>
           </div>
           <n-button size="tiny" secondary @click="updateParams(addRow(spec.queryParams))">+ 添加 param</n-button>
@@ -278,27 +326,27 @@ const urlUnknownVars = computed(() => collectUnknownVars(props.spec.url, props.v
           />
           <div v-if="spec.auth.type === 'bearer'" class="auth-row">
             <label>Token</label>
-            <input
+            <StableTextField
               class="kv-input mono"
               type="password"
-              :value="spec.auth.bearerToken ?? ''"
+              :model-value="spec.auth.bearerToken ?? ''"
               placeholder="{{token}} 或 eyJhb..."
-              @input="(e: any) => updateAuthField('bearerToken', e.target.value)"
+              @update:model-value="(value: string) => updateAuthField('bearerToken', value)"
             />
           </div>
           <div v-if="spec.auth.type === 'basic'" class="auth-row auth-basic">
             <label>用户名</label>
-            <input
+            <StableTextField
               class="kv-input mono"
-              :value="spec.auth.basicUser ?? ''"
-              @input="(e: any) => updateAuthField('basicUser', e.target.value)"
+              :model-value="spec.auth.basicUser ?? ''"
+              @update:model-value="(value: string) => updateAuthField('basicUser', value)"
             />
             <label>密码</label>
-            <input
+            <StableTextField
               class="kv-input mono"
               type="password"
-              :value="spec.auth.basicPass ?? ''"
-              @input="(e: any) => updateAuthField('basicPass', e.target.value)"
+              :model-value="spec.auth.basicPass ?? ''"
+              @update:model-value="(value: string) => updateAuthField('basicPass', value)"
             />
           </div>
           <p v-if="spec.auth.type !== 'none'" class="muted">
@@ -311,8 +359,8 @@ const urlUnknownVars = computed(() => collectUnknownVars(props.spec.url, props.v
         <div class="kv-table">
           <div v-for="(row, i) in spec.headers" :key="i" class="kv-row">
             <input type="checkbox" v-model="row.enabled" />
-            <input class="kv-input mono" v-model="row.key" placeholder="Header 名" />
-            <input class="kv-input mono" v-model="row.value" placeholder="值 (支持 {{var}})" />
+            <StableTextField class="kv-input mono" v-model="row.key" placeholder="Header 名" />
+            <StableTextField class="kv-input mono" v-model="row.value" placeholder="值 (支持 {{var}})" />
             <button class="kv-del" @click="updateHeaders(spec.headers.filter((_, j) => j !== i))">✕</button>
           </div>
           <n-button size="tiny" secondary @click="updateHeaders(addRow(spec.headers))">+ 添加 header</n-button>
@@ -331,38 +379,46 @@ const urlUnknownVars = computed(() => collectUnknownVars(props.spec.url, props.v
               @update:value="(v: any) => spec = { ...spec, bodyType: v }"
             />
             <span v-if="bodyDisabled" class="muted">{{ spec.method }} 请求不带 body</span>
+            <n-button
+              v-if="!bodyDisabled && spec.bodyType === 'json'"
+              size="tiny"
+              secondary
+              @click="formatJson"
+            >格式化</n-button>
           </div>
 
-          <n-input
+          <CodeEditor
             v-if="!bodyDisabled && (spec.bodyType === 'json' || spec.bodyType === 'text')"
-            :value="spec.body"
-            type="textarea"
-            :placeholder="spec.bodyType === 'json' ? '{\n  &quot;key&quot;: &quot;value&quot;\n}' : '任意文本'"
-            :autosize="{ minRows: 6, maxRows: 20 }"
-            @update:value="(v: string) => spec = { ...spec, body: v }"
+            ref="bodyEditor"
+            :model-value="spec.body"
+            :language="spec.bodyType === 'json' ? 'json' : 'plaintext'"
+            height="clamp(180px, 34vh, 360px)"
+            @update:model-value="updateBody"
           />
+          <p v-if="jsonError && spec.bodyType === 'json'" class="body-error">{{ jsonError }}</p>
 
           <div v-if="!bodyDisabled && spec.bodyType === 'form'" class="kv-table">
             <div v-for="(row, i) in spec.queryParams.filter(() => false)" :key="i">
               <!-- keep type -->
             </div>
-            <n-input
-              :value="spec.body"
+            <StableTextField
+              kind="naive"
+              :model-value="spec.body"
               type="textarea"
               placeholder="k1=v1&k2=v2"
               :autosize="{ minRows: 4, maxRows: 12 }"
-              @update:value="(v: string) => spec = { ...spec, body: v }"
+              @update:model-value="updateBody"
             />
           </div>
 
           <div v-if="!bodyDisabled && spec.bodyType === 'multipart'" class="kv-table">
             <div v-for="(field, i) in spec.multipartFields" :key="i" class="mp-row">
               <input type="checkbox" :checked="field.enabled" @change="(e: any) => updateMultipart(i, { enabled: e.target.checked })" />
-              <input
+              <StableTextField
                 class="kv-input mono"
-                :value="field.key"
+                :model-value="field.key"
                 placeholder="字段名"
-                @input="(e: any) => updateMultipart(i, { key: e.target.value })"
+                @update:model-value="(value: string) => updateMultipart(i, { key: value })"
               />
               <n-select
                 :value="field.kind"
@@ -372,11 +428,11 @@ const urlUnknownVars = computed(() => collectUnknownVars(props.spec.url, props.v
                 @update:value="(v: any) => updateMultipart(i, { kind: v, value: '' })"
               />
               <template v-if="field.kind === 'text'">
-                <input
+                <StableTextField
                   class="kv-input mono"
-                  :value="field.value"
+                  :model-value="field.value"
                   placeholder="值 (支持 {{var}})"
-                  @input="(e: any) => updateMultipart(i, { value: e.target.value })"
+                  @update:model-value="(value: string) => updateMultipart(i, { value })"
                 />
               </template>
               <template v-else>
@@ -474,9 +530,12 @@ const urlUnknownVars = computed(() => collectUnknownVars(props.spec.url, props.v
   position: relative;
   display: flex;
   align-items: stretch;
+  min-width: 0;
+  overflow: hidden;
 }
 .url-input {
   flex: 1;
+  min-width: 0;
   padding: 6px 10px;
   background: var(--bg-elev);
   border: 1px solid var(--line);
@@ -485,6 +544,8 @@ const urlUnknownVars = computed(() => collectUnknownVars(props.spec.url, props.v
   caret-color: var(--text);
   font-family: var(--font-mono, monospace);
   font-size: var(--fs-xs);
+  line-height: 18px;
+  box-sizing: border-box;
   outline: none;
   position: relative;
   z-index: 2;
@@ -493,18 +554,20 @@ const urlUnknownVars = computed(() => collectUnknownVars(props.spec.url, props.v
 .url-input:focus { border-color: var(--accent); }
 .url-overlay {
   position: absolute;
-  inset: 0;
+  inset: 1px;
   padding: 6px 10px;
   pointer-events: none;
   font-family: var(--font-mono, monospace);
   font-size: var(--fs-xs);
+  line-height: 18px;
+  box-sizing: border-box;
   color: var(--text);
   white-space: pre;
   overflow: hidden;
   z-index: 1;
 }
-:deep(.var-hit) { background: var(--accent-soft); border-radius: 3px; padding: 0 1px; }
-:deep(.var-miss) { background: var(--error-soft); border-radius: 3px; padding: 0 1px; }
+:deep(.var-hit) { background: var(--accent-soft); border-radius: 3px; }
+:deep(.var-miss) { background: var(--error-soft); border-radius: 3px; }
 
 .var-warn { color: var(--warning); font-size: var(--fs-xxs); padding: 2px 4px; }
 
@@ -565,6 +628,15 @@ const urlUnknownVars = computed(() => collectUnknownVars(props.spec.url, props.v
 
 .body-pane { display: grid; gap: 10px; padding: 4px 0; }
 .body-opts { display: flex; align-items: center; gap: 12px; }
+.body-opts .n-button { margin-left: auto; }
+.body-error {
+  margin: 0;
+  padding: 6px 8px;
+  color: var(--error);
+  background: var(--error-soft);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xxs);
+}
 
 .settings { display: grid; gap: 10px; padding: 4px 0; }
 .opt { display: flex; align-items: center; gap: 8px; font-size: var(--fs-xs); }
