@@ -179,55 +179,61 @@ function parseCookie(raw: string): CookieInfo {
             响应超过 2 MB，仅显示前 2 MB · 使用「保存为文件」获取完整响应
           </div>
 
-          <template v-if="bodyView === 'preview' && isHtml">
-            <iframe class="preview-iframe" sandbox="allow-same-origin" :srcdoc="rawBody" />
-          </template>
-          <template v-else-if="bodyView === 'preview' && isImage">
-            <div class="preview-img">
-              <img :src="previewImageSrc" alt="response" />
-            </div>
-          </template>
-          <template v-else>
-            <pre v-if="!isBinary || bodyView === 'raw'" :class="['body', 'mono']">{{ displayBody }}</pre>
-            <div v-else class="binary-hint">
-              二进制内容（{{ contentType }}），请切换到 Preview 或保存为文件
-            </div>
-          </template>
+          <div class="response-scroll">
+            <template v-if="bodyView === 'preview' && isHtml">
+              <iframe class="preview-iframe" sandbox="allow-same-origin" :srcdoc="rawBody" />
+            </template>
+            <template v-else-if="bodyView === 'preview' && isImage">
+              <div class="preview-img">
+                <img :src="previewImageSrc" alt="response" />
+              </div>
+            </template>
+            <template v-else>
+              <pre v-if="!isBinary || bodyView === 'raw'" :class="['body', 'mono']">{{ displayBody }}</pre>
+              <div v-else class="binary-hint">
+                二进制内容（{{ contentType }}），请切换到 Preview 或保存为文件
+              </div>
+            </template>
+          </div>
         </n-tab-pane>
 
         <n-tab-pane name="headers" :tab="`Headers (${response.headers.length})`">
-          <table class="headers">
-            <tbody>
-              <tr v-for="([k, v]) in response.headers" :key="k">
-                <td class="k mono">{{ k }}</td>
-                <td class="v mono">{{ v }}</td>
-              </tr>
-            </tbody>
-          </table>
+          <div class="response-scroll">
+            <table class="headers">
+              <tbody>
+                <tr v-for="([k, v], i) in response.headers" :key="`${k}-${i}`">
+                  <td class="k mono">{{ k }}</td>
+                  <td class="v mono">{{ v }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </n-tab-pane>
 
         <n-tab-pane name="cookies" :tab="`Cookies (${cookies.length})`">
-          <div v-if="cookies.length === 0" class="empty">无 Set-Cookie</div>
-          <table v-else class="cookies">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Value</th>
-                <th>Attributes</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(c, i) in cookies" :key="i">
-                <td class="mono">{{ c.name }}</td>
-                <td class="mono">{{ c.value }}</td>
-                <td class="mono attrs">
-                  <span v-for="(v, k) in c.attributes" :key="k">
-                    {{ k }}<template v-if="v !== true">={{ v }}</template>
-                  </span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <div class="response-scroll">
+            <div v-if="cookies.length === 0" class="empty">无 Set-Cookie</div>
+            <table v-else class="cookies">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Value</th>
+                  <th>Attributes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(c, i) in cookies" :key="i">
+                  <td class="mono">{{ c.name }}</td>
+                  <td class="mono">{{ c.value }}</td>
+                  <td class="mono attrs">
+                    <span v-for="(v, k) in c.attributes" :key="k">
+                      {{ k }}<template v-if="v !== true">={{ v }}</template>
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </n-tab-pane>
       </n-tabs>
     </template>
@@ -323,40 +329,42 @@ function parseCookie(raw: string): CookieInfo {
   font-size: var(--fs-xxs);
   border-radius: var(--radius-sm);
 }
+.response-scroll {
+  height: clamp(180px, 38vh, 440px);
+  overflow: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
 .body {
   margin: 0;
   padding: 10px 12px;
-  background: var(--bg-elev);
-  border-radius: var(--radius-sm);
   font-size: var(--fs-xs);
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 500px;
-  overflow: auto;
 }
 .preview-iframe {
   width: 100%;
-  height: 500px;
+  height: 100%;
   background: white;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  border: 0;
 }
 .preview-img {
   display: flex;
   justify-content: center;
+  min-height: 100%;
   padding: 12px;
-  background: var(--bg-elev);
-  border-radius: var(--radius-sm);
 }
-.preview-img img { max-width: 100%; max-height: 500px; }
+.preview-img img { max-width: 100%; max-height: 100%; object-fit: contain; }
 .binary-hint {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
   padding: 24px;
   text-align: center;
   color: var(--text-muted);
   font-size: var(--fs-xs);
-  background: var(--bg-elev);
-  border-radius: var(--radius-sm);
 }
 .headers, .cookies { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
 .headers td, .cookies td, .cookies th {
@@ -365,8 +373,8 @@ function parseCookie(raw: string): CookieInfo {
   vertical-align: top;
   text-align: left;
 }
-.cookies th { color: var(--text-muted); font-weight: 500; font-size: var(--fs-xxs); }
+.cookies th { position: sticky; top: 0; color: var(--text-muted); background: var(--bg-elev); font-weight: 500; font-size: var(--fs-xxs); }
 .headers .k { color: var(--text-muted); width: 30%; }
-.headers .v { word-break: break-all; }
+.headers .v, .cookies td { word-break: break-word; overflow-wrap: anywhere; }
 .attrs span { display: inline-block; margin-right: 8px; color: var(--text-muted); }
 </style>

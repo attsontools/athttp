@@ -24,6 +24,7 @@ const props = defineProps<{ host: HttpHost }>();
 const store = useHttpStore();
 const message = useMessage();
 const collapsed = ref(false);
+const requestEditor = ref<{ submit(): void } | null>(null);
 
 // ---- 数据模型只读预览 ----
 const schemaPreviewOpen = ref(false);
@@ -195,6 +196,7 @@ function onKey(ev: KeyboardEvent) {
   if (k === 'enter') {
     ev.preventDefault();
     if (store.activeTab.value?.sending) store.cancel();
+    else if (store.activeTab.value?.kind === 'http') requestEditor.value?.submit();
     else void store.send();
   } else if (k === 't') {
     ev.preventDefault();
@@ -288,6 +290,7 @@ onBeforeUnmount(() => {
       <template v-if="store.activeTab.value">
         <template v-if="store.activeTab.value.kind === 'http'">
           <HttpRequestEditor
+            ref="requestEditor"
             :spec="store.activeTab.value.spec as any"
             :sending="store.activeTab.value.sending"
             :var-context="store.varContext.value"

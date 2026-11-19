@@ -70,6 +70,27 @@ function maybeResolve(editor: MonacoEditor.IStandaloneCodeEditor, value: string)
   }
 }
 
+function replaceValue(value: string) {
+  const editor = instance.value;
+  const model = editor?.getModel();
+  if (!editor || !model || model.getValue() === value) return;
+
+  editor.pushUndoStop();
+  editor.executeEdits('external-format', [{
+    range: model.getFullModelRange(),
+    text: value,
+    forceMoveMarkers: true
+  }]);
+  editor.pushUndoStop();
+  editor.focus();
+}
+
+function focus() {
+  instance.value?.focus();
+}
+
+defineExpose({ replaceValue, focus });
+
 onMounted(async () => {
   if (!container.value) return;
   const monaco = await loadMonaco();

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { NAutoComplete, NButton, NInput, NModal, NTabs, NTabPane } from 'naive-ui';
+import { NButton, NInput, NModal, NTabs, NTabPane } from 'naive-ui';
 import type { HttpEnv, HttpEnvVar } from './types';
 import { COMMON_ENV_VAR_OPTIONS } from './variables';
+import StableTextField from '../ui/StableTextField.vue';
 
 const props = defineProps<{
   show: boolean;
@@ -139,19 +140,20 @@ function looksLikeToken(v: string): boolean {
         <div v-else class="vars">
           <div v-for="v in currentVars" :key="v.id" class="var-row">
             <input type="checkbox" :checked="v.enabled" @change="(e: any) => updateVarEnabled(v, e.target.checked)" />
-            <n-auto-complete
-              :value="v.key"
+            <StableTextField
+              kind="autocomplete"
+              :model-value="v.key"
               :options="COMMON_ENV_VAR_OPTIONS"
               size="small"
               placeholder="变量名"
-              @update:value="(value: string) => updateVarKey(v, value)"
+              @update:model-value="(value: string) => updateVarKey(v, value)"
             />
-            <input
+            <StableTextField
               class="kv-input mono"
               :type="looksLikeToken(v.value) ? 'password' : 'text'"
-              :value="v.value"
+              :model-value="v.value"
               placeholder="值"
-              @input="(e: any) => updateVarValue(v, e.target.value)"
+              @update:model-value="(value: string) => updateVarValue(v, value)"
             />
             <button class="kv-del" @click="emit('delete-var', v.id, v.envId)">✕</button>
           </div>
