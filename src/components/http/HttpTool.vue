@@ -23,7 +23,8 @@ const props = defineProps<{ host: HttpHost }>();
 
 const store = useHttpStore();
 const message = useMessage();
-const collapsed = ref(false);
+const narrowViewport = window.matchMedia('(max-width: 640px)');
+const collapsed = ref(narrowViewport.matches);
 const requestEditor = ref<{ submit(): void } | null>(null);
 
 // ---- 数据模型只读预览 ----
@@ -219,12 +220,18 @@ function onOpenVarsEvent() {
   envModalOpen.value = true;
 }
 
+function onViewportChange(event: MediaQueryListEvent) {
+  if (event.matches) collapsed.value = true;
+}
+
 onMounted(async () => {
+  narrowViewport.addEventListener('change', onViewportChange);
   await store.init();
   window.addEventListener('keydown', onKey);
   window.addEventListener('attool:http-open-vars', onOpenVarsEvent);
 });
 onBeforeUnmount(() => {
+  narrowViewport.removeEventListener('change', onViewportChange);
   window.removeEventListener('keydown', onKey);
   window.removeEventListener('attool:http-open-vars', onOpenVarsEvent);
   window.removeEventListener('mousemove', onSidebarResizeMove);
@@ -267,15 +274,22 @@ onBeforeUnmount(() => {
         <div class="topbar-left">
           <span class="label">环境</span>
           <n-select
+            class="environment-select"
             :value="currentEnvValue"
             :options="envOptions"
             size="small"
-            style="width: 180px"
             @update:value="onEnvSelect"
           />
         </div>
-        <n-button size="tiny" secondary @click="openVarsModal">
-          <span class="mono">{{ '{}' }}</span>&nbsp;变量
+        <n-button
+          class="variables-button"
+          size="tiny"
+          secondary
+          aria-label="管理环境变量"
+          title="管理环境变量"
+          @click="openVarsModal"
+        >
+          <span class="mono">{{ '{}' }}</span><span class="variable-label">&nbsp;变量</span>
         </n-button>
       </div>
 
@@ -373,6 +387,7 @@ onBeforeUnmount(() => {
 }
 .main {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -385,7 +400,25 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--line);
   gap: 12px;
 }
-.topbar-left { display: flex; align-items: center; gap: 6px; }
+.topbar-left {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+}
+.environment-select {
+  width: 180px;
+  max-width: 100%;
+}
+.variables-button { flex: none; }
 .label { color: var(--text-muted); font-size: var(--fs-xs); }
 .mono { font-family: var(--font-mono, ui-monospace, monospace); }
+
+@media (max-width: 640px) {
+  .topbar { padding-inline: 8px; }
+  .topbar-left { flex: 1; }
+  .environment-select { flex: 1; width: 130px; }
+  .label,
+  .variable-label { display: none; }
+}
 </style>
